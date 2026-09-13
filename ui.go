@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
+	"sync"
 )
 
 func interactiveModeNewUI(repoArgs []string) {
@@ -93,21 +93,21 @@ func interactiveModeNewUI(repoArgs []string) {
 	}
 
 	// Generate links
-	fmt.Println("\n" + colorizeBlue("═══════════════════════════════════════════════════════════"))
+	fmt.Println("\n" + colorizeBlue("═══════════════════════════════════════════════════════════════"))
 	fmt.Println(colorizeYellow("📝 Generating Links..."))
-	fmt.Println(colorizeBlue("═══════════════════════════════════════════════════════════\n"))
+	fmt.Println(colorizeBlue("═══════════════════════════════════════════════════════════════\n"))
 
 	generateLinksBatch(repoSVGs, repos, token, commitsPerSVG)
 }
 
 func printHeader() {
 	clearScreen()
-	fmt.Println(colorizeGreen("╔═══════════════════════════════════════════════════════════╗"))
-	fmt.Println(colorizeGreen("║                                                           ║"))
+	fmt.Println(colorizeGreen("╔═══════════════════════════════════════════════════════════════╗"))
+	fmt.Println(colorizeGreen("║                                                               ║"))
 	fmt.Println(colorizeGreen("║         🚀 CDN LINK GENERATOR PRO (Go Edition)           ║"))
 	fmt.Println(colorizeGreen("║         Multi-SVG | Multi-CDN | Lightning Fast           ║"))
-	fmt.Println(colorizeGreen("║                                                           ║"))
-	fmt.Println(colorizeGreen("╚═══════════════════════════════════════════════════════════╝\n"))
+	fmt.Println(colorizeGreen("║                                                               ║"))
+	fmt.Println(colorizeGreen("╚═══════════════════════════════════════════════════════════════╝\n"))
 }
 
 func generateLinksBatch(repoSVGs map[string][]string, repos []GitHubRepo, token string, commitsPerSVG int) {
@@ -174,7 +174,7 @@ func generateLinksBatch(repoSVGs map[string][]string, repos []GitHubRepo, token 
 	fmt.Printf("%s Success rate: %s%%\n\n", colorizeBlue("📊"), colorizeGreen(fmt.Sprintf("%.1f", float64(len(validLinks))*100/float64(len(allLinks)))))
 
 	// Save results
-	filename := "cdn_links_" + getTimestamp() + ".txt"
+	filename := "cdn_links_" + getTimeString() + ".txt"
 	if err := saveLinks(filename, validLinks); err != nil {
 		fmt.Println(colorizeRed("✗ Error saving links: " + err.Error()))
 	} else {
@@ -182,7 +182,7 @@ func generateLinksBatch(repoSVGs map[string][]string, repos []GitHubRepo, token 
 	}
 
 	if len(brokenLinks) > 0 {
-		filename := "cdn_links_broken_" + getTimestamp() + ".txt"
+		filename := "cdn_links_broken_" + getTimeString() + ".txt"
 		if err := saveLinks(filename, brokenLinks); err != nil {
 			fmt.Println(colorizeRed("✗ Error saving broken links: " + err.Error()))
 		} else {
@@ -212,9 +212,4 @@ func saveLinks(filename string, links []string) error {
 
 func clearScreen() {
 	fmt.Print("\033[2J\033[H")
-}
-
-func getTimestamp() string {
-	// TODO: import time and use time.Now()
-	return "now"
 }

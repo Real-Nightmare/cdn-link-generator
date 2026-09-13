@@ -1,0 +1,31 @@
+# Binaries
+cdn-link-gen
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Output files
+cdn_links_*.txt
+
+# Test binary
+*.test
+*.out
+
+# Token file
+.cdn_tokens.json
+~/.cdn_tokens.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Go
+go.sum
+.go/
