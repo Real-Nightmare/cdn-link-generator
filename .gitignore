@@ -1,22 +1,18 @@
 # Binaries
 cdn-link-gen
-*.exe
-*.exe~
-*.dll
-*.so
-*.so.*
-*.dylib
+cdn-link-gen.exe
+dist/
 
 # Output files
 cdn_links_*.txt
+*.csv.tmp
 
 # Test binary
 *.test
 *.out
 
-# Token file
+# Token file (never commit)
 .cdn_tokens.json
-~/.cdn_tokens.json
 
 # IDE
 .vscode/
@@ -25,7 +21,3 @@ cdn_links_*.txt
 *.swo
 *~
 .DS_Store
-
-# Go
-go.sum
-.go/

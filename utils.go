@@ -2,12 +2,7 @@ package main
 
 import (
 	"fmt"
-	"sync"
 	"time"
-)
-
-var (
-	once sync.Once
 )
 
 func getTimeString() string {

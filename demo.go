@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -12,9 +13,9 @@ func runDemo() {
 	fmt.Println(colorizeYellow("This demonstrates the tool without requiring GitHub access\n"))
 
 	fmt.Println(colorizeBlue("Step 1: Scanning for SVG files..."))
-	for i := 0; i <= 3; i++ {
+	for i := 0; i < 3; i++ {
 		fmt.Printf("\rProgress: %d/3", i+1)
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(400 * time.Millisecond)
 	}
 	fmt.Println()
 
@@ -28,7 +29,7 @@ func runDemo() {
 
 	fmt.Println("\n" + colorizeGreen("✓ Statistics:"))
 	fmt.Printf("  Total SVGs: %s\n", colorizeBlue("5"))
-	fmt.Printf("  CDN providers: %s\n", colorizeBlue("13"))
+	fmt.Printf("  CDN providers: %s\n", colorizeBlue(strconv.Itoa(len(cdnProviders))))
 	fmt.Printf("  With 100 commits per SVG: %s links\n\n", colorizeBlue("6,500"))
 
 	fmt.Println(colorizeYellow("⏳ Generating 6,500 CDN links..."))
@@ -40,7 +41,8 @@ func runDemo() {
 
 	fmt.Println("\n" + colorizeGreen("✓ Link generation complete!"))
 	fmt.Printf("  Generated: %s links\n", colorizeBlue("6,500"))
-	fmt.Printf("  File size: %s\n\n", colorizeBlue("~325 KB"))
+	fmt.Printf("  File size: %s\n", colorizeBlue("~325 KB"))
+	fmt.Println()
 
 	fmt.Println(colorizeYellow("🧪 Testing links for validity..."))
 	for i := 0; i <= 100; i += 10 {
@@ -52,14 +54,16 @@ func runDemo() {
 	fmt.Println("\n" + colorizeGreen("✓ Link validation complete!"))
 	fmt.Printf("  Valid links: %s\n", colorizeGreen("6,435"))
 	fmt.Printf("  Broken links: %s\n", colorizeRed("65"))
-	fmt.Printf("  Success rate: %s%%\n\n", colorizeGreen("98.9"))
+	fmt.Printf("  Success rate: %s%%\n", colorizeGreen("98.9"))
+	fmt.Println()
 
 	fmt.Println(colorizeGreen("✓ Files saved:"))
 	fmt.Println("  • cdn_links_2024-01-15_10-30-45.txt (6,435 valid links)")
 	fmt.Println("  • cdn_links_broken_2024-01-15_10-30-45.txt (65 broken links)")
 
 	fmt.Println("\n" + colorizeYellow("💡 Next steps:"))
-	fmt.Println("  1. Run: ./cdn-link-gen generate owner/repo")
-	fmt.Println("  2. Add tokens: ./cdn-link-gen token add")
-	fmt.Println("  3. View results: cat cdn_links_*.txt | head -20\n")
+	fmt.Println("  1. Add a token: cdn-link-gen token add")
+	fmt.Println("  2. Generate: cdn-link-gen generate owner/repo -y")
+	fmt.Println("  3. View results: head -20 cdn_links_*.txt")
+	fmt.Println()
 }

@@ -1,18 +1,23 @@
+# Build stage
 FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
-COPY . .
+COPY go.mod ./
+COPY *.go ./
 
-RUN go mod download && \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o cdn-link-gen .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o cdn-link-gen .
 
+# Runtime stage
 FROM alpine:latest
 
 RUN apk add --no-cache ca-certificates git
 
-WORKDIR /workspace
+COPY --from=builder /app/cdn-link-gen /usr/local/bin/cdn-link-gen
 
-COPY --from=builder /app/cdn-link-gen /usr/local/bin/
+# Run as non-root
+RUN adduser -D appuser
+USER appuser
+WORKDIR /workspace
 
 ENTRYPOINT ["cdn-link-gen"]
 CMD ["--help"]

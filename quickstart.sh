@@ -1,39 +1,30 @@
 #!/bin/bash
 
-# CDN Link Generator - Quick Start Guide
-# Works in Google Cloud Shell and local machines
+# CDN Link Generator Pro - Quick Start
+# Works in Google Cloud Shell, Codespaces, and local machines.
+# For a full installer use: ./install.sh
 
 set -e
 
 echo "🚀 CDN Link Generator Pro - Quick Start"
-echo "=====================================\n"
+echo "======================================="
 
 # Check if Go is installed
 if ! command -v go &> /dev/null; then
-    echo "❌ Go not found. Installing..."
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        curl -fsSL https://go.dev/dl/go1.21.0.linux-amd64.tar.gz | tar -C /usr/local -xz
-        export PATH=$PATH:/usr/local/go/bin
-    fi
+    echo "❌ Go not found. Run ./install.sh first (it installs Go automatically)."
+    exit 1
 fi
+echo "✓ Go is ready: $(go version)"
 
-echo "✓ Go is ready"
-echo "📥 Downloading dependencies..."
+echo "🔨 Compiling (zero dependencies, instant)..."
+CGO_ENABLED=0 go build -ldflags="-s -w" -o cdn-link-gen .
 
-go mod download 2>/dev/null || true
-go mod tidy 2>/dev/null || true
-
-echo "✓ Compiling..."
-GO111MODULE=on CGO_ENABLED=0 go build -o cdn-link-gen . 2>/dev/null
-
-echo "✓ Build complete!\n"
-echo "🚦 First, add your GitHub token:"
-echo "  ./cdn-link-gen token add"
+echo "✓ Build complete!"
 echo ""
-echo "📊 Then generate links:"
-echo "  ./cdn-link-gen generate owner/repo"
-echo ""
-echo "🧸 Or try the demo:"
-echo "  ./cdn-link-gen demo"
+echo "🚦 Next steps:"
+echo "  ./cdn-link-gen token add                 # store a GitHub token (recommended)"
+echo "  ./cdn-link-gen generate owner/repo -y    # fully automatic generation"
+echo "  ./cdn-link-gen demo                      # simulated run, no GitHub access"
+echo "  ./cdn-link-gen --help                    # all commands & flags"
 echo ""
 echo "🚀 All set! Start generating!"

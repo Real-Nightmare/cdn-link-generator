@@ -1,26 +1,30 @@
 package main
 
-import "github.com/fatih/color"
+import "os"
 
-var (
-	colorGreen = color.New(color.FgGreen).SprintFunc()
-	colorRed = color.New(color.FgRed).SprintFunc()
-	colorYellow = color.New(color.FgYellow).SprintFunc()
-	colorBlue = color.New(color.FgCyan).SprintFunc()
-)
+var colorEnabled = detectColorSupport()
 
-func colorizeGreen(s string) string {
-	return colorGreen(s)
+func detectColorSupport() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
-func colorizeRed(s string) string {
-	return colorRed(s)
+func colorize(text, code string) string {
+	if !colorEnabled || text == "" {
+		return text
+	}
+	return "\033[" + code + "m" + text + "\033[0m"
 }
 
-func colorizeYellow(s string) string {
-	return colorYellow(s)
-}
-
-func colorizeBlue(s string) string {
-	return colorBlue(s)
-}
+func colorizeGreen(s string) string  { return colorize(s, "32") }
+func colorizeRed(s string) string    { return colorize(s, "31") }
+func colorizeYellow(s string) string { return colorize(s, "33") }
+func colorizeBlue(s string) string   { return colorize(s, "36") }
+func colorizeBold(s string) string   { return colorize(s, "1") }
+func colorizeDim(s string) string    { return colorize(s, "90") }

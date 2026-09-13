@@ -2,55 +2,55 @@
 
 ## General Questions
 
+### Q: What does this tool do?
+A: It takes any GitHub repository, finds every `.svg` file in it (recursively), and generates CDN links for each file across 13 CDN providers — using the repo's real commit history. It then validates the links so you know which ones work.
+
 ### Q: Is this tool legal?
-A: Yes. It's a legitimate CDN link generator using public GitHub APIs. It's similar to how jsDelivr works.
+A: Yes. It's a legitimate CDN link generator using public GitHub APIs — the same way jsDelivr and Githack work.
 
 ### Q: Do I need special permissions?
-A: Just a GitHub account (free) and a personal access token. No admin rights needed.
-
-### Q: Can I use this at school?
-A: Yes, with permission. See INSTALL.md for school-safe setup. Always follow your school's acceptable use policy.
+A: Just a GitHub account (free) and optionally a personal access token. No admin rights needed.
 
 ### Q: Is it free?
-A: Completely free. Open source, no ads, no hidden fees.
+A: Completely free. Open source (MIT), no ads, no hidden fees.
 
 ### Q: What's the difference from the Python version?
-A: This Go version is 50-100x faster, uses less memory, and has better school firewall bypass.
+A: This Go version is much faster, uses less memory, and ships as a single zero-dependency binary.
 
 ---
 
 ## Setup Questions
 
 ### Q: Do I need to install anything?
-A: Just Go (1.21+) and Git. Download from go.dev and git-scm.com.
+A: Go 1.18+ (only to build). The installer (`install.sh`) handles this automatically. The built binary has zero dependencies.
 
 ### Q: Can I use Google Cloud Shell?
-A: Yes! Recommended method. Go/Git pre-installed, Google is usually whitelisted at schools.
-
-### Q: My school blocks GitHub, what do I do?
-A: See INSTALL.md section "School/Corporate Firewall Bypass". Multiple methods listed.
+A: Yes! Go and Git are pre-installed there. Clone, run `./install.sh`, done.
 
 ### Q: Can I use this on Windows?
-A: Yes. Use WSL2, native Go binary, or pre-built .exe.
+A: Yes. Native Go build, WSL2, or the pre-built `.exe` from `make cross-compile`.
 
 ### Q: Can I use Docker?
-A: Yes. `docker build -t cdn-gen . && docker run -it cdn-gen generate owner/repo`
+A: Yes. `docker build -t cdn-link-gen . && docker run --rm -it -e GITHUB_TOKEN=ghp_xxx cdn-link-gen generate owner/repo -y`
 
 ---
 
 ## Token Questions
 
 ### Q: Where do I get a GitHub token?
-A: https://github.com/settings/tokens/new - Select "repo" scope.
+A: https://github.com/settings/tokens — classic tokens work fine. For public repos no scope is needed; add `repo` scope only for private repos.
+
+### Q: Do I even need a token?
+A: Not strictly — public repos work unauthenticated at 60 GitHub requests/hour. With a token you get 5000/hour and private repo access.
 
 ### Q: Can I use my main GitHub password?
-A: No, you must use a Personal Access Token (PAT).
+A: No. GitHub requires Personal Access Tokens (or fine-grained tokens `github_pat_…`).
 
 ### Q: Are my tokens safe?
-A: Yes. Stored in ~/.cdn_tokens.json with 0600 permissions (only you can read).
+A: Yes. Stored in `~/.cdn_tokens.json` with `0600` permissions (only your user can read), and input is hidden when you type them.
 
-### Q: Can I add multiple tokens?
-A: Yes, up to 10. Helps for rate limiting: `./cdn-link-gen token add`
+### Q: How does the tool pick which token to use?
+A: `GITHUB_TOKEN` env var first, then the first stored token, then unauthenticated.
 
 ### Q: What if I lose my token?
 A: Delete it and create a new one. Never share your token.
@@ -60,209 +60,154 @@ A: Delete it and create a new one. Never share your token.
 ## Usage Questions
 
 ### Q: How many links can I generate?
-A: Technically unlimited. Limited by:
-- Commits per SVG: 1-1,000,000
-- Number of SVGs: Unlimited
-- CDNs: 13 available
-- Formula: SVGs × Commits × CDNs = Total Links
+A: Limited by real commit history: SVGs × commits × CDNs = total links. A repo with 3 SVGs, 42 commits, and all 13 CDNs = 1,638 links. Use `-commits N` to cap it.
 
 ### Q: How long does it take?
-A: Typical speeds:
-- 5 SVGs × 100 commits: 10 seconds
-- 50 SVGs × 1000 commits: 2 minutes
-- 100 SVGs × 10000 commits: 5-10 minutes
+A: Scanning and generation are nearly instant (concurrent). Validation is the slow part — roughly 5-10 seconds per 1000 links at the default concurrency of 20. Skip it with `-no-validate`.
 
 ### Q: Will broken links affect my site?
-A: No. Tool automatically tests and removes broken links.
+A: No. The tool tests and separates them into `_broken.txt`; use the `_valid.txt` file.
 
 ### Q: Can I use other people's repos?
-A: Yes, if they're public. Private repos need your token to have access.
+A: Yes, if they're public. Private repos need a token with access.
 
-### Q: Do I need to credit anything?
-A: No, but attribution appreciated: "Generated with CDN Link Generator Pro"
+### Q: How do I skip the confirmation prompt?
+A: Add `-y` — that's the fully automatic mode.
 
 ---
 
 ## Technical Questions
 
 ### Q: Why Go instead of Python?
-A: Performance. Go is 50-100x faster for concurrent operations.
-
-### Q: Can I modify the source?
-A: Yes! It's open source. Fork and customize as needed.
+A: Performance and deployment. Goroutines handle thousands of concurrent validations, and the result is a single static binary with zero dependencies.
 
 ### Q: What are the system requirements?
-A: Minimal. 10MB disk, 20MB RAM, any OS (Linux/Mac/Windows).
-
-### Q: How does the school firewall bypass work?
-A: Multiple methods:
-1. Direct connection (if allowed)
-2. CORS proxies
-3. Alternative routing
-4. VPN fallback
+A: Minimal. ~15MB disk for the binary, ~20MB RAM at work, any OS (Linux/macOS/Windows/ARM).
 
 ### Q: Is it secure?
-A: Yes. No malware, no tracking, open source code.
+A: Yes. No malware, no tracking, no telemetry, open source. Tokens only ever go to `api.github.com` over HTTPS.
+
+### Q: Does it work offline?
+A: No. It needs the GitHub API to scan repos and fetch commits.
+
+### Q: Can I modify the source?
+A: Yes! It's MIT-licensed. Fork and customize as needed.
 
 ---
 
 ## CDN Questions
 
 ### Q: Why 13 CDNs?
-A: Redundancy. If one CDN blocks you, others work.
+A: Redundancy. If one CDN is slow or blocked for your users, others work.
 
 ### Q: Which CDN is fastest?
 A: Depends on location:
 - jsDelivr (Primary): Worldwide
-- Gcore: Europe/Asia
+- jsDelivr (Gcore): Europe/Asia
 - StaticDelivr: Americas
 
-### Q: Can I use SVG-only CDNs for HTML files?
-A: No. Tool prevents this. Use "CDN #1" or mix of CDNs instead.
-
 ### Q: Do these links expire?
-A: No. CDN links are permanent as long as the GitHub repo exists.
+A: Commit-pinned links are permanent as long as the repo exists. StaticDelivr's unversioned URLs always serve the latest version.
 
 ### Q: Can I use these links commercially?
-A: Yes, as long as you have rights to the content.
+A: Yes, as long as you have the rights to the underlying content.
+
+### Q: Can I add my own CDN?
+A: Yes — edit `cdn.go`, add an entry to `cdnProviders` with the right URL format, rebuild.
 
 ---
 
 ## Error Handling
 
-### Q: "Network error" - what do I do?
-A: 1. Check internet connection
-2. Try again
-3. Use VPN or alternative bypass
-4. Run `bash test-firewall.sh`
+### Q: "Repo not found or no access" — what do I do?
+A: 1. Check the format is `owner/repo`
+2. Public repo + no token? You may be rate-limited — wait or add a token
+3. Private repo? Your token needs `repo` scope
 
 ### Q: "No SVG files found"
-A: Repo doesn't have .svg files, or they're named differently (.SVG instead).
+A: The repo has no `.svg` files on its default branch. The scan is recursive and case-insensitive, so subfolders and `.SVG` extensions are covered.
 
 ### Q: "Permission denied" on macOS/Linux
-A: `chmod +x cdn-link-gen && chmod +x *.sh`
+A: `chmod +x cdn-link-gen`
 
 ### Q: "Build failed"
-A: 
-1. Check Go version: `go version` (need 1.21+)
+A: 1. Check Go version: `go version` (need 1.18+)
 2. Clean: `go clean`
 3. Rebuild: `go build -o cdn-link-gen .`
 
 ### Q: "Invalid token"
-A: Token might be:
-- Expired
-- Wrong scope
-- Already revoked
-Get a new one at https://github.com/settings/tokens
+A: Token might be expired, revoked, or lacking scope. Run `cdn-link-gen token verify`, then get a new one at https://github.com/settings/tokens
 
----
-
-## School-Specific Questions
-
-### Q: Will my school detect this?
-A: If you follow terms of service, no. Bypass just makes GitHub accessible like any other website.
-
-### Q: Is using a VPN allowed?
-A: Check your school's acceptable use policy. Most allow personal VPNs.
-
-### Q: Should I use Google Cloud Shell at school?
-A: Yes! Google is usually whitelisted. Cloud Shell is "school-safe".
-
-### Q: What if my school blocks VPNs?
-A: Try:
-1. Mobile hotspot
-2. Public WiFi
-3. Home/friend's network
-4. GitHub Codespaces
-5. Glitch or Replit
-
-### Q: Can my school see my GitHub token?
-A: No. It's stored locally in ~/.cdn_tokens.json
+### Q: "GitHub API rate limit exceeded"
+A: Add a token (`cdn-link-gen token add`) or `export GITHUB_TOKEN=…`. Check remaining quota with `cdn-link-gen token verify`.
 
 ---
 
 ## Performance Questions
 
 ### Q: How do I speed it up?
-A: 
-1. Reduce commits per SVG
-2. Use fewer SVGs
-3. Skip link validation
-4. Use faster network (mobile hotspot)
-
-### Q: Why is it slow on Raspberry Pi?
-A: Goroutines need CPU. Reduce concurrent tests in github.go.
+A: 1. Skip validation: `-no-validate`
+2. Fewer commits: `-commits 10`
+3. Fewer CDNs: `-cdns 1,2,3`
 
 ### Q: Can I run multiple instances?
-A: Yes, just use different output files.
+A: Yes — use `-out` to give each run its own output file.
 
 ### Q: Does it use a lot of bandwidth?
-A: Minimal. Mostly API calls, not file downloads.
+A: Minimal. API calls plus a HEAD request per validated link — no file downloads.
 
 ---
 
 ## Output Questions
 
 ### Q: What do the output files contain?
-A: One valid CDN link per line. Ready to use immediately.
+A: One CDN link per line. `_valid.txt` has only links that passed validation; `_broken.txt` has the rest.
+
+### Q: Can I get CSV instead?
+A: Yes: `-format csv -out links.csv` (or any `-out` ending in `.csv`).
 
 ### Q: Why are some links broken?
-A: Rare edge cases. Tool removes them automatically.
-
-### Q: Can I edit the links?
-A: Yes. They're just text files.
+A: Occasionally a CDN edge hasn't cached a fresh commit yet, or a provider rejects certain paths. The tool removes them automatically.
 
 ### Q: How do I share the links?
-A: Upload to cloud storage, email, GitHub gist, etc.
-
-### Q: Can I convert to different format?
-A: Yes. See USAGE.md for JSON, HTML, CSV examples.
+A: Upload the txt/csv anywhere — cloud storage, gists, email.
 
 ---
 
 ## Integration Questions
 
-### Q: Can I use in my website?
-A: Yes! CDN links are standard URLs.
+### Q: Can I use these in my website?
+A: Yes! They're standard URLs:
 ```html
 <img src="https://cdn.jsdelivr.net/gh/owner/repo@commit/file.svg">
 ```
 
 ### Q: Can I use in GitHub Actions?
-A: Yes. See USAGE.md for CI/CD example.
+A: Yes — see the CI/CD example in USAGE.md. Use `secrets.GITHUB_TOKEN` or a PAT secret.
 
 ### Q: Can I automate link generation?
-A: Yes. Create a cron job or GitHub Action to regenerate monthly.
-
-### Q: Can I use with other tools?
-A: Yes. Links work anywhere that accepts URLs.
+A: Yes. `-y` makes runs fully non-interactive, so cron jobs and CI pipelines "just work".
 
 ---
 
 ## Maintenance Questions
 
 ### Q: How often should I regenerate?
-A: Links don't expire. Regenerate if:
-- New SVG files added
-- Repository moved
-- CDN availability changes
+A: Commit-pinned links never expire, but regenerate when you add new SVGs or want more versions covered.
 
 ### Q: How do I update the tool?
-A: 
+A:
 ```bash
 git pull origin main
 go build -o cdn-link-gen .
 ```
-
-### Q: Is there an update check?
-A: Check GitHub Releases manually.
 
 ---
 
 ## Security Questions
 
 ### Q: Is my GitHub token exposed?
-A: No. It's only used locally and sent over HTTPS to GitHub.
+A: No. It's stored locally (`0600`), typed with hidden input, and only sent over HTTPS to GitHub.
 
 ### Q: Does the tool track me?
 A: No. Open source, no telemetry, no external services.
@@ -270,57 +215,44 @@ A: No. Open source, no telemetry, no external services.
 ### Q: Can I audit the code?
 A: Yes! It's all public: https://github.com/Real-Nightmare/cdn-link-generator
 
-### Q: Is it safe for school networks?
-A: Yes. No viruses, no malware, just generates links.
-
 ---
 
 ## Limits & Rate Limiting
 
 ### Q: GitHub API rate limits?
-A: 5000 requests/hour with token (60/hour unauthenticated).
-Tool uses ~1-5 requests per operation.
+A: 5000 requests/hour with a token, 60/hour without. Each repo costs ~2 requests (tree scan + commit list) regardless of SVG count.
 
 ### Q: File size limits?
-A: No limit. Generated files can be gigabytes.
-
-### Q: CDN bandwidth limits?
-A: CDNs typically have generous free tiers.
+A: No practical limit — output is streamed to disk in bulk.
 
 ### Q: Repo size limits?
-A: Tool works with any size repo.
+A: The tool works with any repo; huge trees may be flagged as truncated by GitHub, and the tool warns you when that happens.
 
 ---
 
 ## Uncommon Questions
 
 ### Q: Can I run this on a server?
-A: Yes. Just build and run via cron/scheduler.
-
-### Q: Does it work offline?
-A: No. Needs GitHub API access.
-
-### Q: Can I use old Go versions?
-A: No. Requires Go 1.21+ (2023+).
-
-### Q: Can I modify the CDNs?
-A: Yes. Edit cdn.go and rebuild.
+A: Yes. Build once, run via cron/scheduler with `-y`.
 
 ### Q: Will it work on ARM64?
-A: Yes. Go compiles to ARM64 (Apple Silicon).
+A: Yes — including Apple Silicon and Raspberry Pi (Go cross-compiles natively).
+
+### Q: What is -make-commits?
+A: An optional feature for repos you own: it creates N real commits via `git fast-import`, pushes them, and then generates links from the new history. Requires a token with write access and git installed. Plain `generate` never writes to anyone's repo.
 
 ---
 
 ## Support
 
 Still have questions?
-1. Check README.md
-2. See INSTALL.md for setup
-3. See USAGE.md for examples
-4. Run demo: `./cdn-link-gen demo`
+1. Check [README.md](README.md)
+2. See [INSTALL.md](INSTALL.md) for setup
+3. See [USAGE.md](USAGE.md) for examples
+4. Run `./cdn-link-gen demo`
 5. Open an issue on GitHub
 
 ---
 
-**Last Updated:** 2024
-**Version:** Pro Edition (Go)
+**Last Updated:** 2025
+**Version:** 2.0 (Go)

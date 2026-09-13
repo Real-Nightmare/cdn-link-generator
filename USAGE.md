@@ -5,22 +5,22 @@
 ### Quick Start (2 minutes)
 
 ```bash
-# Setup
+# Setup (Go 1.18+, zero dependencies)
 git clone https://github.com/Real-Nightmare/cdn-link-generator.git
 cd cdn-link-generator
-bash quickstart.sh
+./install.sh
 
-# Add token
+# Add token (recommended)
 ./cdn-link-gen token add
-# Paste your GitHub token
 
-# Generate links
-./cdn-link-gen generate owner/repo
-# Follow prompts
+# Generate links — fully automatic
+./cdn-link-gen generate owner/repo -y
 
 # View results
-cat cdn_links_*.txt | head -20
+head -20 cdn_links_*.txt
 ```
+
+> No token? It still works for public repos (60 GitHub requests/hour).
 
 ---
 
@@ -29,214 +29,191 @@ cat cdn_links_*.txt | head -20
 ### Generate CDN Links
 
 ```bash
-./cdn-link-gen generate <owner/repo> [owner/repo2] [owner/repo3]
+./cdn-link-gen generate <owner/repo> [owner/repo2] [owner/repo3] [flags]
 ```
 
 **Examples:**
 
 ```bash
-# Single repo
-./cdn-link-gen generate torvalds/linux
+# Interactive (shows findings, asks to confirm)
+./cdn-link-gen generate owner/repo
 
-# Multiple repos (all SVGs will be combined)
-./cdn-link-gen generate torvalds/linux microsoft/vscode
+# Fully automatic — no prompts
+./cdn-link-gen generate owner/repo -y
 
-# Three repos
-./cdn-link-gen generate org/icons org/patterns org/backgrounds
+# Multiple repos (all SVGs combined)
+./cdn-link-gen generate owner/icons owner/patterns -y
+
+# Custom CDNs only (IDs, names, or domains)
+./cdn-link-gen generate owner/repo -y -cdns 1,2,3
+./cdn-link-gen generate owner/repo -y -cdns githack,staticdelivr
+
+# CSV output
+./cdn-link-gen generate owner/repo -y -format csv -out links.csv
+
+# Fastest: skip validation
+./cdn-link-gen generate owner/repo -y -no-validate
+
+# Cap commits per SVG
+./cdn-link-gen generate owner/repo -y -commits 25
 ```
 
-**Interactive prompts:**
+**What happens in a run:**
 
-1. Scans for SVG files (shows progress)
+1. Scans each repo recursively for `.svg` files (one Trees API call per repo)
 2. Displays found SVGs
-3. Shows available CDNs (13 total)
-4. Asks for commits per SVG (1-1,000,000)
-5. Shows total link count estimate
-6. Asks for confirmation
-7. Generates links (progress shown)
-8. Tests link validity (shows % success)
-9. Saves results to files
+3. Fetches the repos' commit history (up to 100 commits per repo)
+4. Generates `SVGs × commits × CDNs` links concurrently
+5. Saves all links to `cdn_links_<timestamp>.txt`
+6. Validates every link in parallel (unless `-no-validate`)
+7. Splits results into `_valid.txt` and `_broken.txt`
 
 ### Token Management
 
 ```bash
-# Add a new token
+# Add a new token (input hidden)
 ./cdn-link-gen token add
-# Paste token when prompted
 
-# List all saved tokens
+# List saved tokens (masked)
 ./cdn-link-gen token list
-# Shows: "1. ghp_abc... (40 chars)"
+
+# Verify active token + rate limit
+./cdn-link-gen token verify
 
 # Remove a token
 ./cdn-link-gen token remove 1
-# Removes token #1
 
 # Clear all tokens
 ./cdn-link-gen token clear
-# Asks for confirmation
 ```
+
+Tokens are used in this order: `GITHUB_TOKEN` env → first stored token → unauthenticated.
 
 ### Testing & Demo
 
 ```bash
-# Run demo (no GitHub access needed)
+# Simulated run (no GitHub access needed)
 ./cdn-link-gen demo
-# Shows simulated run with sample data
 
-# Test firewall connectivity
-bash test-firewall.sh
-# Shows which methods work on your network
+# List the 13 CDN providers
+./cdn-link-gen cdns
 
-# Test with school setup
-bash school-safe-setup.sh
-# Optimizes for school environment
+# Version
+./cdn-link-gen version
 ```
 
 ### Help
 
 ```bash
-# Show all commands
-./cdn-link-gen
-
-# View this guide
-cat USAGE.md
+./cdn-link-gen --help
+./cdn-link-gen generate -h
 ```
 
 ---
 
 ## Step-by-Step Workflow
 
-### Step 1: Get a GitHub Token
+### Step 1: Get a GitHub Token (optional but recommended)
 
-1. Go to https://github.com/settings/tokens/new
-2. Name it: "CDN Link Generator"
-3. Select scope: **`repo`** (full control of repositories)
-4. Click "Generate token"
-5. Copy the token (it won't show again!)
+1. Go to https://github.com/settings/tokens
+2. Generate a new token (classic): name it "CDN Link Generator"
+3. Select scope: **`repo`** only if you need private repos — public repos need no scope
+4. Copy the token (it won't be shown again!)
 
 ### Step 2: Add Token to Tool
 
 ```bash
 ./cdn-link-gen token add
-# Paste your token
+# Paste your token (input is hidden)
 # ✓ Token added successfully
 ```
 
-### Step 3: Prepare Your Repository
-
-Your repository must:
-- ✅ Be public (or you have access)
-- ✅ Contain .svg files
-- ✅ Be on GitHub (github.com)
-
-If private, ensure your token has access.
-
-### Step 4: Run Generator
+Or use the environment variable (great for CI):
 
 ```bash
-./cdn-link-gen generate owner/repo
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
 ```
 
-### Step 5: Answer Prompts
+### Step 3: Pick a Repository
+
+Any GitHub repo containing `.svg` files — yours or public ones:
+
+```bash
+./cdn-link-gen generate owner/repo -y
+```
+
+### Step 4: Read the Output
 
 ```
-Scanning repositories for SVG files...
-
 ✓ Found SVG files:
   owner/repo: 3 SVG(s)
     • icon.svg
     • logo.svg
     • pattern.svg
 
-✓ Total SVGs found: 3
-✓ CDN providers available: 13
-✓ Potential links to generate: 39 (with 1 commit per SVG)
+✓ Total SVGs: 3
+✓ CDN providers: 13
+✓ Rate limit: 4987/5000 requests remaining
+✓ Unique commits found: 42
+✓ Total links to generate: 5,460
+✓ Estimated output size: 426.5 KB
 
-Enter number of commits per SVG (1-1000000): 100
-
-✓ Total links to generate: 3,900
-⚠ This will create ~195KB of data
-
-Proceed with generation? (y/N): y
-```
-
-### Step 6: Wait for Generation
-
-```
+📝 Generating links...
 ⏳ Processing: 3/3 SVGs
-
 ✓ Link generation complete!
-  Generated: 3,900 links
-  
+  Generated: 5,460 links
+✓ Links saved to: cdn_links_2025-01-15_10-30-45.txt
+
 🧪 Testing links for validity...
-
-✓ Valid links: 3,885
-✗ Broken links: 15
-📊 Success rate: 99.6%
-
-✓ Valid links saved to: cdn_links_2024-01-15_10-30-45.txt
-⚠ Broken links saved to: cdn_links_broken_2024-01-15_10-30-45.txt
-
-✓ Done! All files ready in current directory.
-💡 Tip: Use 'cat cdn_links_*.txt | head -20' to preview links
+✓ Valid links: 5,452
+✗ Broken links: 8
+📊 Success rate: 99.9%
+✓ Valid links saved to: cdn_links_2025-01-15_10-30-45_valid.txt
+⚠ Broken links saved to: cdn_links_2025-01-15_10-30-45_broken.txt
 ```
 
-### Step 7: Use Your Links
+### Step 5: Use Your Links
 
 ```bash
-# View first 20 links
-cat cdn_links_2024-01-15_10-30-45.txt | head -20
+# Preview
+head -20 cdn_links_2025-01-15_10-30-45_valid.txt
 
-# Count total links
-wc -l cdn_links_2024-01-15_10-30-45.txt
+# Count
+wc -l cdn_links_*.txt
 
 # Copy to clipboard (macOS)
-cat cdn_links_2024-01-15_10-30-45.txt | pbcopy
+cat cdn_links_*_valid.txt | pbcopy
 
 # Copy to clipboard (Linux)
-cat cdn_links_2024-01-15_10-30-45.txt | xclip -i
-
-# Upload to cloud
-gcloud storage cp cdn_links_*.txt gs://my-bucket/
+cat cdn_links_*_valid.txt | xclip -selection clipboard
 ```
 
 ---
 
 ## Output Files Explained
 
-### `cdn_links_[timestamp].txt`
+### `cdn_links_<timestamp>.txt`
 
-One working CDN link per line:
+Every generated link, one per line:
 
 ```
-https://cdn.jsdelivr.net/gh/owner/repo@commit1/icon.svg
-https://fastly.jsdelivr.net/gh/owner/repo@commit1/icon.svg
-https://gcore.jsdelivr.net/gh/owner/repo@commit1/icon.svg
+https://cdn.jsdelivr.net/gh/owner/repo@<commit1>/icon.svg
+https://fastly.jsdelivr.net/gh/owner/repo@<commit1>/icon.svg
+https://gcore.jsdelivr.net/gh/owner/repo@<commit1>/icon.svg
 https://cdn.staticdelivr.com/gh/owner/repo/icon.svg
-https://githubraw.com/owner/repo/commit1/icon.svg
-https://rawcdn.githack.com/owner/repo/commit1/icon.svg
-https://cdn.jsdelivr.net/gh/owner/repo@commit2/icon.svg
+https://githubraw.com/owner/repo/<commit1>/icon.svg
+https://rawcdn.githack.com/owner/repo/<commit1>/icon.svg
+https://cdn.jsdelivr.net/gh/owner/repo@<commit2>/icon.svg
 ...
 ```
 
-**Use cases:**
-- Website hosting
-- Image CDN
-- Icon libraries
-- Asset delivery
-- Backup URLs
+### `cdn_links_<timestamp>_valid.txt`
 
-### `cdn_links_broken_[timestamp].txt`
+Only links that passed validation (HTTP 2xx/3xx). **Use these.**
 
-Links that returned errors (usually very few):
+### `cdn_links_<timestamp>_broken.txt`
 
-```
-https://some-cdn.net/gh/owner/repo@corrupt-commit/icon.svg
-https://another-cdn.net/bad-link.svg
-```
-
-**Don't use these**, use valid links only.
+Links that failed validation. **Don't use these** — kept for transparency.
 
 ---
 
@@ -248,57 +225,48 @@ https://another-cdn.net/bad-link.svg
 ./cdn-link-gen generate \
   owner/icons \
   owner/patterns \
-  owner/backgrounds
+  owner/backgrounds -y
 ```
 
-**Result:** Combined output with all repos' SVGs
+Failing repos are reported with `⚠` but never abort the run.
 
-### Large Commit Counts
+### Create Fresh Commits (repos you own)
 
 ```bash
-# Generate 100,000 commits per SVG
-./cdn-link-gen generate owner/repo
-# Enter: 100000
-# Result: 1,300,000 links (with 13 CDNs)
+# Creates N new commits in the repo via git fast-import, pushes them,
+# then generates links from the new history. Requires a token with repo
+# write access and git installed.
+./cdn-link-gen generate owner/your-repo -make-commits -commits 100 -y
 ```
-
-**Note:** Takes longer but creates massive link backlog
 
 ### Processing CSV Data
 
 ```bash
-# Extract unique CDNs
-grep -oP 'https://\K[^/]+' cdn_links_*.txt | sort -u
-
-# Count per CDN
+# Count links per CDN
 grep -oP 'https://\K[^/]+' cdn_links_*.txt | sort | uniq -c
 
-# Get only Gcore CDN links
+# Get only Gcore links
 grep 'gcore.jsdelivr.net' cdn_links_*.txt > gcore_only.txt
 
 # Random sample (10 links)
-shuf -n 10 cdn_links_*.txt
+shuf -n 10 cdn_links_*_valid.txt
 ```
 
 ### Batch Processing
 
 ```bash
 #!/bin/bash
-# Process multiple repo groups
-
 REPOS=(
   "org1/repo1"
   "org1/repo2"
   "org2/repo1"
-  "org2/repo2"
 )
 
 for repo in "${REPOS[@]}"; do
   echo "Processing $repo..."
-  ./cdn-link-gen generate $repo <<< $'100\ny' # 100 commits, auto-confirm
+  ./cdn-link-gen generate "$repo" -y -no-validate
 done
 
-# Combine all results
 cat cdn_links_*.txt > all_links.txt
 echo "Generated $(wc -l < all_links.txt) total links"
 ```
@@ -309,47 +277,36 @@ echo "Generated $(wc -l < all_links.txt) total links"
 # Only jsDelivr links
 grep 'jsdelivr.net' cdn_links_*.txt > jsdelivr_only.txt
 
-# Only GitHub-based (raw, githack)
+# Only GitHub-based CDNs
 grep -E '(githubraw|githack)' cdn_links_*.txt > github_only.txt
 
 # Only non-GitHub CDNs
-grep -v -E '(github|githack)' cdn_links_*.txt > third_party_only.txt
+grep -v -E '(githubraw|githack)' cdn_links_*.txt > third_party_only.txt
 ```
 
-### Upload to Cloud Storage
+### CI/CD Integration
 
-```bash
-# Google Cloud Storage
-gsutil cp cdn_links_*.txt gs://my-bucket/cdn-links/
-gsutil acl ch -u AllUsers:R gs://my-bucket/cdn-links/*
-
-# AWS S3
-aws s3 cp cdn_links_*.txt s3://my-bucket/cdn-links/
-aws s3api put-object-acl --bucket my-bucket --key cdn-links/ --acl public-read
-
-# Azure Blob
-az storage blob upload \
-  --container-name cdn-links \
-  --file cdn_links_*.txt \
-  --account-name mystorageaccount
-```
-
-### Create Manifest File
-
-```bash
-# Create JSON manifest
-cat > manifest.json << 'EOF'
-{
-  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "repository": "owner/repo",
-  "total_links": $(wc -l < cdn_links_*.txt),
-  "cdn_count": 13,
-  "file": "cdn_links_$(basename cdn_links_*.txt)",
-  "broken_count": $(wc -l < cdn_links_broken_*.txt 2>/dev/null || echo 0)
-}
-EOF
-
-echo "Created manifest.json"
+```yaml
+# GitHub Actions
+name: Generate CDN Links
+on:
+  workflow_dispatch:
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - run: go build -o cdn-link-gen .
+      - run: ./cdn-link-gen generate owner/repo -y -format csv
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdn-links
+          path: cdn_links_*.csv
 ```
 
 ---
@@ -359,38 +316,34 @@ echo "Created manifest.json"
 ### For Speed
 
 ```bash
-# Reduce commits per SVG
-./cdn-link-gen generate owner/repo
-# Enter: 10 (fast)
+# Skip validation (validation is the slow part — it touches every CDN)
+./cdn-link-gen generate owner/repo -y -no-validate
 
-# Skip link testing
-# Edit github.go, comment out testLinksParallel call
-go build -o cdn-link-gen .
+# Fewer commits per SVG
+./cdn-link-gen generate owner/repo -y -commits 10
+
+# Fewer CDNs
+./cdn-link-gen generate owner/repo -y -cdns 1,2
 ```
 
 ### For Reliability
 
 ```bash
-# Increase commits per SVG
-./cdn-link-gen generate owner/repo
-# Enter: 10000 (more redundancy)
+# More commits = more redundancy across CDN versions
+./cdn-link-gen generate owner/repo -y -commits 100
 
-# More thorough testing
-# Edit github.go:
-# testLinksParallel(allLinks, 50)  # Increase from 20
-go build -o cdn-link-gen .
+# Thorough validation with higher concurrency
+./cdn-link-gen generate owner/repo -y -c 50
 ```
 
 ### For Storage
 
 ```bash
-# Smaller output
-./cdn-link-gen generate owner/repo
-# Enter: 1 (minimal)
+# Minimal output
+./cdn-link-gen generate owner/repo -y -commits 1
 
-# Compress results
+# Compress results (~80% smaller)
 gzip cdn_links_*.txt
-# Result: 80% size reduction
 ```
 
 ---
@@ -401,48 +354,36 @@ gzip cdn_links_*.txt
 
 ```bash
 ./cdn-link-gen token add
-# Add your GitHub token
+# …or just continue unauthenticated for public repos.
 ```
 
 ### "Repo not found"
 
 ```bash
-# Check repo exists and is accessible
-# Format should be: owner/repo (lowercase preferred)
-# Example: Real-Nightmare/cdn-link-generator
+# Format: owner/repo (full GitHub URLs also accepted)
+./cdn-link-gen generate facebook/react -y
 ```
 
 ### "No SVG files found"
 
-```bash
-# Repo must have .svg files (lowercase extension)
-# Check files in repo are .svg not .SVG
-# Or repo might be completely empty
-```
+- Repo must contain `.svg` files on the default branch
+- Scan is recursive and case-insensitive (`logo.SVG` counts too)
 
 ### "Network timeout"
 
-```bash
-# Try again (GitHub API might be slow)
-# Or use VPN/alternative connection
-./cdn-link-gen test-firewall
-```
+The HTTP client retries transient failures 3× automatically. For persistent issues check https://www.githubstatus.com/
 
 ### "Permission denied"
 
 ```bash
 chmod +x cdn-link-gen
-chmod +x *.sh
 ```
 
 ### "Build failed"
 
 ```bash
-# Clean build
 go clean
 go build -o cdn-link-gen .
-
-# Or use pre-built binary from releases
 ```
 
 ---
@@ -451,55 +392,29 @@ go build -o cdn-link-gen .
 
 ### 1. Parallel Generation
 
-Generate for multiple repos simultaneously:
+Generate for multiple repos simultaneously (separate output files):
 
 ```bash
 for repo in repo1 repo2 repo3; do
-  (./cdn-link-gen generate org/$repo &)
+  (./cdn-link-gen generate org/$repo -y -out links_$repo.txt -no-validate &)
 done
 wait
 ```
 
-### 2. Automatic Retry
+### 2. Automatic Retry Wrapper
 
 ```bash
 #!/bin/bash
-for i in {1..3}; do
-  ./cdn-link-gen generate owner/repo && break
+for i in 1 2 3; do
+  ./cdn-link-gen generate owner/repo -y && break
   sleep 5
 done
 ```
 
-### 3. Monitor Progress
+### 3. Verify Links Locally
 
 ```bash
-# In one terminal
-./cdn-link-gen generate owner/repo
-
-# In another
-watch 'wc -l cdn_links_*.txt'
-```
-
-### 4. Format Output
-
-```bash
-# Markdown list
-cat cdn_links_*.txt | sed 's/^/- [CDN](/' | sed 's/$/)/' > output.md
-
-# HTML list
-cat cdn_links_*.txt | sed 's/^/<li><a href="/' | sed 's/$/">Link<\/a><\/li>/' > output.html
-
-# JSON array
-echo '[' > output.json
-cat cdn_links_*.txt | sed 's/^/"/' | sed 's/$/",/' | head -n -1 >> output.json
-echo '"LAST_LINK"]' >> output.json
-```
-
-### 5. Verify Links Locally
-
-```bash
-# Check first 10 links
-head -10 cdn_links_*.txt | while read link; do
+head -10 cdn_links_*_valid.txt | while read link; do
   echo -n "Testing $link... "
   curl -sI "$link" | head -1
 done
@@ -512,7 +427,6 @@ done
 ### Use in Website
 
 ```html
-<!-- Load SVG from CDN -->
 <img src="https://cdn.jsdelivr.net/gh/owner/repo@commit/icon.svg" alt="Icon">
 ```
 
@@ -533,61 +447,36 @@ img.src = cdnLink;
 document.body.appendChild(img);
 ```
 
-### CI/CD Integration
-
-```yaml
-# GitHub Actions
-name: Generate CDN Links
-on: [push]
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v2
-      - run: go build -o cdn-link-gen .
-      - run: ./cdn-link-gen generate owner/repo
-      - uses: actions/upload-artifact@v2
-        with:
-          name: cdn-links
-          path: cdn_links_*.txt
-```
-
 ---
 
 ## Best Practices
 
 ✅ **DO:**
-- Use public repositories
-- Store tokens securely
-- Test links before using
-- Keep backups of link lists
+- Use a token (5000 req/hour vs 60)
+- Keep backups of valid-link files
 - Use multiple CDNs for redundancy
-- Monitor link expiration
+- Re-run validation before relying on old lists
 
 ❌ **DON'T:**
 - Share your GitHub token
-- Use broken links
-- Overload single CDN
-- Store tokens in code
-- Forget to test connectivity
-- Ignore firewall warnings
+- Commit tokens to repos
+- Use broken links in production
+- Hammer validation with `-c 500` — you'll just rate-limit yourself
 
 ---
 
 ## Getting Help
 
-1. Run demo: `./cdn-link-gen demo`
-2. Test setup: `bash test-firewall.sh`
-3. Check tokens: `./cdn-link-gen token list`
-4. Read README: `cat README.md`
-5. View logs: Check terminal output
+1. `./cdn-link-gen demo` — simulated run
+2. `./cdn-link-gen cdns` — provider list
+3. `./cdn-link-gen token verify` — token health
+4. Read [README.md](README.md) and [FAQ.md](FAQ.md)
 
 ---
 
 ## Next Steps
 
-1. ✅ Setup (INSTALL.md)
+1. ✅ Setup ([INSTALL.md](INSTALL.md))
 2. ✅ Add token
 3. ✅ Try demo
 4. ✅ Generate your first links

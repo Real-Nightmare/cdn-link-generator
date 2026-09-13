@@ -1,215 +1,406 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
-func interactiveModeNewUI(repoArgs []string) {
+// ---------- Options ----------
+
+type options struct {
+	commitsPerSVG int
+	cdnSelection  []string
+	outputFile    string
+	format        string // "txt" or "csv"
+	noValidate    bool
+	yes           bool
+	skipPrompt    bool // alias for yes in automatic mode
+	concurrency   int
+	makeCommits   bool
+}
+
+// ---------- Interactive mode (no flags) ----------
+
+func interactiveMode(repoArgs []string) {
 	printHeader()
 
-	// Load tokens
-	tokens, err := loadTokens()
-	if err != nil {
-		fmt.Println(colorizeRed("✗ Error: " + err.Error()))
-		return
+	token := getTokenFromEnv()
+	if token == "" {
+		if tokens, err := loadTokens(); err == nil && len(tokens) > 0 {
+			token = tokens[0]
+			fmt.Printf(colorizeGreen("✓ Using saved token: %s…\n\n"), token[:minInt(6, len(token))])
+		}
+	} else {
+		fmt.Printf(colorizeGreen("✓ Using GITHUB_TOKEN: %s…\n\n"), token[:minInt(6, len(token))])
+	}
+	if token == "" {
+		fmt.Println(colorizeYellow("⚠ No token found — running unauthenticated (public repos only, 60 requests/hour).\n"))
 	}
 
-	if len(tokens) == 0 {
-		fmt.Println(colorizeRed("✗ No tokens available. Add one first with: ./cdn-link-gen token add"))
-		return
-	}
-
-	token := tokens[0]
-	fmt.Printf(colorizeGreen("✓ Using token: %s...\n\n"), token[:6])
-
-	// Parse repositories
 	var repos []GitHubRepo
 	for _, repoStr := range repoArgs {
 		repo, err := parseRepoURL(repoStr)
 		if err != nil {
-			fmt.Println(colorizeRed("✗ Invalid repo: " + repoStr + " - " + err.Error()))
+			fmt.Println(colorizeRed("✗ Invalid repo: " + repoStr + " — " + err.Error()))
 			return
 		}
 		repos = append(repos, repo)
 	}
-
 	if len(repos) == 0 {
 		fmt.Println(colorizeRed("✗ No valid repositories provided"))
 		return
 	}
 
-	// Fetch SVG files
-	fmt.Println(colorizeYellow("🔍 Scanning repositories for SVG files..."))
-	repoSVGs, err := getAllSVGFiles(repos, token)
-	if err != nil {
-		fmt.Println(colorizeRed("✗ Error: " + err.Error()))
-		return
+	opts := &options{commitsPerSVG: 0}
+	fmt.Println(colorizeYellow("🔍 Scanning repositories for SVG files…"))
+	runWorkflow(repos, token, opts)
+}
+
+// ---------- Automatic mode (flags) ----------
+
+func automaticMode(repoArgs []string, opts *options) {
+	token := getTokenFromEnv()
+	if token == "" {
+		if tokens, err := loadTokens(); err == nil && len(tokens) > 0 {
+			token = tokens[0]
+		}
+	}
+	if token == "" {
+		fmt.Println(colorizeYellow("⚠ No token found — running unauthenticated (public repos only, 60 requests/hour)."))
+		fmt.Println(colorizeYellow("  For private repos or higher limits: export GITHUB_TOKEN=ghp_… or run 'token add'."))
 	}
 
-	if len(repoSVGs) == 0 {
-		fmt.Println(colorizeRed("✗ No SVG files found in any repository"))
-		return
+	var repos []GitHubRepo
+	var invalid []string
+	for _, repoStr := range repoArgs {
+		repo, err := parseRepoURL(repoStr)
+		if err != nil {
+			invalid = append(invalid, repoStr)
+			continue
+		}
+		repos = append(repos, repo)
+	}
+	for _, bad := range invalid {
+		fmt.Println(colorizeYellow("⚠ Skipping invalid repo: " + bad))
+	}
+	if len(repos) == 0 {
+		fmt.Println(colorizeRed("✗ No valid repositories provided"))
+		os.Exit(1)
 	}
 
-	// Display found SVGs
+	_, _, _ = getRateLimit(token) // warm-up; non-fatal
+	runWorkflow(repos, token, opts)
+}
+
+// ---------- Shared workflow ----------
+
+func runWorkflow(repos []GitHubRepo, token string, opts *options) {
+	fmt.Println(colorizeYellow("🔍 Scanning repositories for SVG files…"))
+
+	repoSVGs, repoErrs := getAllSVGFiles(repos, token)
+	for name, err := range repoErrs {
+		fmt.Println(colorizeYellow(fmt.Sprintf("⚠ %s: %v", name, err)))
+	}
+
+	// Display found SVGs (deterministic order).
+	var repoNames []string
+	var totalSVGs int
+	for _, r := range repos {
+		key := r.Owner + "/" + r.Name
+		if _, ok := repoSVGs[key]; ok {
+			repoNames = append(repoNames, key)
+			totalSVGs += len(repoSVGs[key])
+		}
+	}
+
+	if totalSVGs == 0 {
+		fmt.Println(colorizeRed("✗ No SVG files found in any accessible repository"))
+		fmt.Println(colorizeYellow("  (Repos must contain .svg files on their default branch)"))
+		os.Exit(1)
+	}
+
 	fmt.Println()
 	fmt.Println(colorizeGreen("✓ Found SVG files:"))
-	totalSVGs := 0
-	for repoName, svgs := range repoSVGs {
-		fmt.Printf("  %s: %d SVG(s)\n", colorizeBlue(repoName), len(svgs))
-		for _, svg := range svgs {
+	for _, name := range repoNames {
+		fmt.Printf("  %s: %s\n", colorizeBlue(name), colorizeBold(fmt.Sprintf("%d SVG(s)", len(repoSVGs[name]))))
+		if len(repoSVGs[name]) == 0 {
+			fmt.Println(colorizeDim("    (no SVG files)"))
+		}
+		for _, svg := range repoSVGs[name] {
 			fmt.Printf("    • %s\n", svg)
 		}
-		totalSVGs += len(svgs)
 	}
 
+	cdns, err := selectCDNs(opts.cdnSelection)
+	if err != nil {
+		fmt.Println(colorizeRed("✗ " + err.Error()))
+		os.Exit(1)
+	}
+
+	commitsPerSVG := opts.commitsPerSVG
 	fmt.Println()
-	fmt.Printf(colorizeGreen("✓ Total SVGs found: %d\n"), totalSVGs)
-	fmt.Printf(colorizeGreen("✓ CDN providers available: %d\n"), len(cdnProviders))
-	fmt.Printf(colorizeGreen("✓ Potential links to generate: %d\n\n"), totalSVGs*len(cdnProviders))
+	fmt.Printf("%s Total SVGs: %s\n", colorizeGreen("✓"), colorizeBold(strconv.Itoa(totalSVGs)))
+	fmt.Printf("%s CDN providers: %s\n", colorizeGreen("✓"), colorizeBold(strconv.Itoa(len(cdns))))
+	fmt.Printf("%s Rate limit: %s\n", colorizeGreen("✓"), colorizeDim(func() string {
+		rem, lim, err := getRateLimit(token)
+		if err != nil {
+			return "unknown"
+		}
+		return fmt.Sprintf("%d/%d requests remaining", rem, lim)
+	}()))
 
-	// Ask for number of commits per SVG
-	fmt.Print(colorizeYellow("Enter number of commits per SVG (1-1000000): "))
-	var commitsPerSVG int
-	if _, err := fmt.Scanln(&commitsPerSVG); err != nil || commitsPerSVG < 1 {
-		fmt.Println(colorizeRed("✗ Invalid input. Using default: 1000"))
-		commitsPerSVG = 1000
+	// Fetch real commits (up to 100 per repo via the commits API).
+	fmt.Println(colorizeYellow("\n🔍 Fetching commit history…"))
+	commitPool := make([]string, 0, 100)
+	for _, r := range repos {
+		shas, err := getCommitSHAs(r, token, 100)
+		if err != nil {
+			fmt.Println(colorizeYellow(fmt.Sprintf("⚠ Could not list commits for %s/%s: %v", r.Owner, r.Name, err)))
+			continue
+		}
+		commitPool = append(commitPool, shas...)
+	}
+	if len(commitPool) == 0 {
+		fmt.Println(colorizeRed("✗ No commits available — cannot generate versioned links"))
+		os.Exit(1)
+	}
+	uniqueCommits := uniqueStrings(commitPool)
+	fmt.Printf("%s Unique commits found: %s\n", colorizeGreen("✓"), colorizeBold(strconv.Itoa(len(uniqueCommits))))
+
+	if commitsPerSVG <= 0 {
+		commitsPerSVG = len(uniqueCommits)
+	}
+	commitsPerSVG = clampInt(commitsPerSVG, 1, len(uniqueCommits))
+
+	totalLinks := totalSVGs * commitsPerSVG * len(cdns)
+	fmt.Printf("%s Total links to generate: %s\n", colorizeGreen("✓"), colorizeBold(humanizeCount(totalLinks)))
+	fmt.Printf("%s Estimated output size: %s\n\n", colorizeGreen("✓"), colorizeDim(estimateSize(totalLinks)))
+
+	if !opts.yes {
+		fmt.Print(colorizeYellow("Proceed with generation? (y/N): "))
+		reader := bufio.NewReader(os.Stdin)
+		answer, _ := reader.ReadString('\n')
+		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+			fmt.Println(colorizeYellow("Cancelled."))
+			return
+		}
 	}
 
-	totalLinks := totalSVGs * commitsPerSVG * len(cdnProviders)
-	fmt.Printf("\n%s Total links to generate: %d\n", colorizeGreen("✓"), totalLinks)
-	fmt.Printf("%s This will create ~%dMB of data\n\n", colorizeYellow("⚠"), (totalLinks*50)/1024/1024)
+	// ---- Generate links ----
+	fmt.Println("\n" + colorizeBlue("═══════════════════════════════════════════════════════════"))
+	fmt.Println(colorizeYellow("📝 Generating links…"))
+	fmt.Println(colorizeBlue("═══════════════════════════════════════════════════════════\n"))
 
-	// Ask for confirmation
-	fmt.Print(colorizeYellow("Proceed with generation? (y/N): "))
-	var confirm string
-	fmt.Scanln(&confirm)
-	if strings.ToLower(confirm) != "y" {
-		fmt.Println(colorizeYellow("Cancelled."))
-		return
-	}
-
-	// Generate links
-	fmt.Println("\n" + colorizeBlue("═══════════════════════════════════════════════════════════════"))
-	fmt.Println(colorizeYellow("📝 Generating Links..."))
-	fmt.Println(colorizeBlue("═══════════════════════════════════════════════════════════════\n"))
-
-	generateLinksBatch(repoSVGs, repos, token, commitsPerSVG)
-}
-
-func printHeader() {
-	clearScreen()
-	fmt.Println(colorizeGreen("╔═══════════════════════════════════════════════════════════════╗"))
-	fmt.Println(colorizeGreen("║                                                               ║"))
-	fmt.Println(colorizeGreen("║         🚀 CDN LINK GENERATOR PRO (Go Edition)           ║"))
-	fmt.Println(colorizeGreen("║         Multi-SVG | Multi-CDN | Lightning Fast           ║"))
-	fmt.Println(colorizeGreen("║                                                               ║"))
-	fmt.Println(colorizeGreen("╚═══════════════════════════════════════════════════════════════╝\n"))
-}
-
-func generateLinksBatch(repoSVGs map[string][]string, repos []GitHubRepo, token string, commitsPerSVG int) {
 	var allLinks []string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	processed := int32(0)
 
-	totalSVGs := 0
-	for _, svgs := range repoSVGs {
-		totalSVGs += len(svgs)
-	}
-
-	processedSVGs := 0
-
-	for repoKey, svgs := range repoSVGs {
-		for _, svg := range svgs {
+	for _, name := range repoNames {
+		parts := strings.SplitN(name, "/", 2)
+		owner, repoName := parts[0], parts[1]
+		for _, svg := range repoSVGs[name] {
 			wg.Add(1)
-			go func(rk, s string) {
+			go func(owner, repoName, svg string) {
 				defer wg.Done()
-				defer func() {
-					processedSVGs++
-					fmt.Printf("\r%s Processing: %d/%d SVGs", colorizeBlue("⏳"), processedSVGs, totalSVGs)
-				}()
-
-				// Generate commits
-				commits, err := generateCommits(GitHubRepo{}, token, commitsPerSVG)
-				if err != nil {
-					return
-				}
-
-				// Generate links for all CDNs
-				for _, cdn := range cdnProviders {
-					for _, commit := range commits {
-						link := generateCDNLink(
-							strings.Split(rk, "/")[0],
-							strings.Split(rk, "/")[1],
-							commit,
-							s,
-							cdn.Domain,
-							cdn.Format,
-						)
-						mu.Lock()
-						allLinks = append(allLinks, link)
-						mu.Unlock()
+				links := make([]string, 0, commitsPerSVG*len(cdns))
+				for i := 0; i < commitsPerSVG; i++ {
+					sha := uniqueCommits[i%len(uniqueCommits)]
+					for _, cdn := range cdns {
+						links = append(links, generateCDNLink(owner, repoName, sha, svg, cdn.Domain, cdn.Format))
 					}
 				}
-			}(repoKey, svg)
+				mu.Lock()
+				allLinks = append(allLinks, links...)
+				mu.Unlock()
+				done := atomic.AddInt32(&processed, 1)
+				fmt.Printf("\r%s Processing: %d/%d SVGs", colorizeBlue("⏳"), done, totalSVGs)
+			}(owner, repoName, svg)
 		}
 	}
-
 	wg.Wait()
 	fmt.Println()
 
-	// Display statistics
 	fmt.Println(colorizeGreen("\n✓ Link generation complete!"))
-	fmt.Printf("  Generated: %s links\n", colorizeBlue(fmt.Sprintf("%d", len(allLinks))))
+	fmt.Printf("  Generated: %s links\n", colorizeBlue(humanizeCount(len(allLinks))))
 
-	// Test links
-	fmt.Println("\n" + colorizeYellow("🧪 Testing links for validity..."))
-	validLinks, brokenLinks := testLinksParallel(allLinks, 20)
-
-	fmt.Printf("\n%s Valid links: %s\n", colorizeGreen("✓"), colorizeGreen(fmt.Sprintf("%d", len(validLinks))))
-	fmt.Printf("%s Broken links: %s\n", colorizeRed("✗"), colorizeRed(fmt.Sprintf("%d", len(brokenLinks))))
-	fmt.Printf("%s Success rate: %s%%\n\n", colorizeBlue("📊"), colorizeGreen(fmt.Sprintf("%.1f", float64(len(validLinks))*100/float64(len(allLinks)))))
-
-	// Save results
-	filename := "cdn_links_" + getTimeString() + ".txt"
-	if err := saveLinks(filename, validLinks); err != nil {
-		fmt.Println(colorizeRed("✗ Error saving links: " + err.Error()))
-	} else {
-		fmt.Printf(colorizeGreen("✓ Valid links saved to: %s\n"), filename)
+	// ---- Save raw links ----
+	outFile := opts.outputFile
+	if outFile == "" {
+		outFile = "cdn_links_" + getTimeString() + ".txt"
 	}
+	if opts.format == "csv" && !strings.HasSuffix(outFile, ".csv") {
+		outFile = strings.TrimSuffix(outFile, ".txt") + ".csv"
+	}
+	if err := saveLinks(outFile, allLinks, opts.format); err != nil {
+		fmt.Println(colorizeRed("✗ Error saving links: " + err.Error()))
+		os.Exit(1)
+	}
+	fmt.Printf(colorizeGreen("✓ Links saved to: %s\n"), outFile)
 
-	if len(brokenLinks) > 0 {
-		filename := "cdn_links_broken_" + getTimeString() + ".txt"
-		if err := saveLinks(filename, brokenLinks); err != nil {
-			fmt.Println(colorizeRed("✗ Error saving broken links: " + err.Error()))
+	// ---- Validation ----
+	if opts.noValidate {
+		fmt.Println(colorizeYellow("\n⚠ Validation skipped (--no-validate)"))
+	} else {
+		fmt.Println("\n" + colorizeYellow("🧪 Testing links for validity…"))
+		validLinks, brokenLinks := testLinksParallel(allLinks, opts.concurrency, func(done, total int) {
+			fmt.Printf("\r%s Testing: %d/%d links", colorizeBlue("🧪"), done, total)
+		})
+		fmt.Println()
+
+		rate := 0.0
+		if len(allLinks) > 0 {
+			rate = float64(len(validLinks)) * 100 / float64(len(allLinks))
+		}
+		fmt.Printf("\n%s Valid links: %s\n", colorizeGreen("✓"), colorizeGreen(humanizeCount(len(validLinks))))
+		fmt.Printf("%s Broken links: %s\n", colorizeRed("✗"), colorizeRed(humanizeCount(len(brokenLinks))))
+		fmt.Printf("%s Success rate: %s%%\n", colorizeBlue("📊"), colorizeGreen(fmt.Sprintf("%.1f", rate)))
+
+		validFile := strings.TrimSuffix(outFile, ".txt") + "_valid.txt"
+		if opts.format == "csv" {
+			validFile = strings.TrimSuffix(outFile, ".csv") + "_valid.csv"
+		}
+		if err := saveLinks(validFile, validLinks, opts.format); err != nil {
+			fmt.Println(colorizeRed("✗ Error saving valid links: " + err.Error()))
 		} else {
-			fmt.Printf(colorizeYellow("⚠ Broken links saved to: %s\n"), filename)
+			fmt.Printf(colorizeGreen("✓ Valid links saved to: %s\n"), validFile)
+		}
+		if len(brokenLinks) > 0 {
+			brokenFile := strings.TrimSuffix(outFile, ".txt") + "_broken.txt"
+			if opts.format == "csv" {
+				brokenFile = strings.TrimSuffix(outFile, ".csv") + "_broken.csv"
+			}
+			if err := saveLinks(brokenFile, brokenLinks, opts.format); err != nil {
+				fmt.Println(colorizeRed("✗ Error saving broken links: " + err.Error()))
+			} else {
+				fmt.Printf(colorizeYellow("⚠ Broken links saved to: %s\n"), brokenFile)
+			}
 		}
 	}
 
 	fmt.Println()
-	fmt.Println(colorizeGreen("✓ Done! All files ready in current directory."))
-	fmt.Println(colorizeYellow("💡 Tip: Use 'cat ' + filename + ' | head -20' to preview links\n"))
+	fmt.Println(colorizeGreen("✓ Done! Files ready in current directory."))
+	fmt.Println(colorizeYellow(fmt.Sprintf("💡 Tip: use 'head -20 %s' to preview links\n", outFile)))
 }
 
-func saveLinks(filename string, links []string) error {
+// generateWithCommitCreation builds fresh commits in the user's repo, then
+// generates links from them (for repos the user owns).
+func generateWithCommitCreation(repoArgs []string, opts *options) {
+	token := getTokenFromEnv()
+	if token == "" {
+		if tokens, err := loadTokens(); err == nil && len(tokens) > 0 {
+			token = tokens[0]
+		}
+	}
+	if token == "" {
+		fmt.Println(colorizeRed("✗ -make-commits requires a token with repo write access."))
+		fmt.Println(colorizeRed("  Set GITHUB_TOKEN or run: cdn-link-gen token add"))
+		os.Exit(1)
+	}
+	if len(repoArgs) != 1 {
+		fmt.Println(colorizeRed("✗ -make-commits works with exactly one repo you own"))
+		os.Exit(1)
+	}
+	repo, err := parseRepoURL(repoArgs[0])
+	if err != nil {
+		fmt.Println(colorizeRed("✗ " + err.Error()))
+		os.Exit(1)
+	}
+
+	gm, err := NewGitManager(repo.Owner, repo.Name, token)
+	if err != nil {
+		fmt.Println(colorizeRed("✗ " + err.Error()))
+		os.Exit(1)
+	}
+	defer gm.Cleanup()
+
+	if err := gm.CloneRepo(); err != nil {
+		fmt.Println(colorizeRed("✗ " + err.Error()))
+		os.Exit(1)
+	}
+	commits, err := gm.GenerateCommits(opts.commitsPerSVG)
+	if err != nil {
+		fmt.Println(colorizeRed("✗ " + err.Error()))
+		os.Exit(1)
+	}
+	fmt.Printf(colorizeGreen("✓ Created %d commits\n"), len(commits))
+
+	if err := gm.PushCommits(); err != nil {
+		fmt.Println(colorizeRed("✗ " + err.Error()))
+		os.Exit(1)
+	}
+	fmt.Println(colorizeGreen("✓ Commits pushed to GitHub"))
+
+	// Now run the normal workflow using these commits.
+	runWorkflow([]GitHubRepo{repo}, token, opts)
+}
+
+// ---------- Small helpers ----------
+
+func printHeader() {
+	fmt.Println(colorizeGreen("╔═══════════════════════════════════════════════════════════╗"))
+	fmt.Println(colorizeGreen("║            🚀 CDN LINK GENERATOR PRO (Go Edition)         ║"))
+	fmt.Println(colorizeGreen("║           Multi-SVG | Multi-CDN | Lightning Fast          ║"))
+	fmt.Println(colorizeGreen("╚═══════════════════════════════════════════════════════════╝\n"))
+}
+
+func saveLinks(filename string, links []string, format string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
+	w := bufio.NewWriter(file)
+	defer w.Flush()
+
+	if format == "csv" {
+		if _, err := w.WriteString("url\n"); err != nil {
+			return err
+		}
+		for _, link := range links {
+			if _, err := w.WriteString("\"" + link + "\"\n"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, link := range links {
-		if _, err := file.WriteString(link + "\n"); err != nil {
+		if _, err := w.WriteString(link + "\n"); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func clearScreen() {
-	fmt.Print("\033[2J\033[H")
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func estimateSize(totalLinks int) string {
+	const bytesPerLink = 80
+	return humanizeBytes(int64(totalLinks) * bytesPerLink)
 }
