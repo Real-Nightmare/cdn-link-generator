@@ -12,7 +12,7 @@ const version = "2.0.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		printWelcome()
+		runMenu() // interactive UI
 		return
 	}
 
@@ -22,6 +22,15 @@ func main() {
 	switch cmd {
 	case "generate", "gen", "create":
 		handleGenerate(args)
+	case "setup", "configure", "init":
+		runSetup()
+	case "settings", "config":
+		showSettings()
+	case "fix-path":
+		if err := installSelfToPath(); err != nil {
+			fmt.Println(colorizeRed("✗ " + err.Error()))
+			os.Exit(1)
+		}
 	case "token":
 		if len(args) < 1 {
 			fmt.Println("Usage: cdn-link-gen token <add|list|remove|clear|verify>")
@@ -43,6 +52,14 @@ func main() {
 	}
 }
 
+// showSettings prints the persisted configuration.
+func showSettings() {
+	s := loadSettings()
+	fmt.Printf(colorizeBold("\nCurrent settings (%s):\n"), getSettingsFilePath())
+	fmt.Println(formatSettings(s))
+	fmt.Println("Change them with: " + colorizeBold("cdn-link-gen setup"))
+}
+
 // handleGenerate parses flags and positional repo args in any order.
 func handleGenerate(args []string) {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
@@ -53,9 +70,19 @@ func handleGenerate(args []string) {
 	out := fs.String("out", "", "output file (default: cdn_links_<timestamp>.txt)")
 	format := fs.String("format", "txt", "output format: txt or csv")
 	noValidate := fs.Bool("no-validate", false, "skip link validation (fastest)")
+	validate := fs.Bool("validate", false, "force link validation on (overrides saved settings)")
 	yes := fs.Bool("y", false, "skip confirmation prompt (automatic mode)")
 	concurrency := fs.Int("c", 20, "concurrent validation requests")
 	makeCommits := fs.Bool("make-commits", false, "create new commits in a repo you own, then generate links")
+
+	explicit := map[string]bool{
+		"commits": isFlagSet("commits", args),
+		"cdns": isFlagSet("cdns", args),
+		"format": isFlagSet("format", args),
+		"c": isFlagSet("c", args),
+		"no-validate": isFlagSet("no-validate", args),
+		"validate": isFlagSet("validate", args),
+	}
 
 	// Partition args into positional repos and flag tokens, supporting flags
 	// before, between, or after repo arguments.
@@ -94,7 +121,12 @@ func handleGenerate(args []string) {
 		yes:           *yes,
 		concurrency:   *concurrency,
 		makeCommits:   *makeCommits,
+		forceValidate: *validate,
 	}
+
+	// Merge saved defaults so persistent settings apply automatically
+	// (command-line flags always win).
+	applySavedDefaults(opts, loadSettings(), explicit)
 
 	if opts.format != "txt" && opts.format != "csv" {
 		fmt.Println(colorizeRed("✗ Invalid format (use txt or csv)"))
@@ -220,6 +252,21 @@ func splitCSV(s string) []string {
 	return out
 }
 
+// isFlagSet reports whether the named flag appears in raw args (with - or --,
+// and either -flag value or -flag=value forms).
+func isFlagSet(name string, args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		base := strings.TrimLeft(a, "-")
+		if k := strings.SplitN(base, "=", 2)[0]; k == name {
+			return true
+		}
+	}
+	return false
+}
+
 func printCDNs() {
 	fmt.Println(colorizeBold("\n📡 Available CDN providers:"))
 	for _, cdn := range cdnProviders {
@@ -236,6 +283,9 @@ func printWelcome() {
 	printHeader()
 	fmt.Println(colorizeBold("Available Commands:"))
 	fmt.Println("  generate <repo…>   Generate CDN links for every SVG in the repos")
+	fmt.Println("  setup              Interactive setup wizard (saves everything permanently)")
+	fmt.Println("  settings           Show current saved settings")
+	fmt.Println("  fix-path           Install binary on PATH + permanent profile fix")
 	fmt.Println("  token add          Add a GitHub token")
 	fmt.Println("  token list         List saved tokens")
 	fmt.Println("  token verify       Verify the active token & show rate limit")

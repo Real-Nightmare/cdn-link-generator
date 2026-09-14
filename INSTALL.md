@@ -23,7 +23,22 @@ The installer:
 1. Detects your platform (Linux/macOS — amd64, arm64, armv6/v7)
 2. Installs Go automatically if missing (user-local, no sudo required)
 3. Builds the binary (zero third-party dependencies — works offline)
-4. Installs to `/usr/local/bin` (or `~/.local/bin` with a PATH hint if not writable)
+4. **Copies** it to `/usr/local/bin` (or `~/.local/bin` if not writable) — the repo copy `./cdn-link-gen` always keeps working
+5. Adds the install dir to your `~/.bashrc` / `~/.profile` automatically if it's missing from PATH
+6. Clones the repo for you first if you run it via `curl | sh` outside a clone
+7. Delegates the PATH fix to the binary's own `fix-path` (verified, permanent)
+
+## First-Run Setup
+
+After installing, run the interactive wizard once:
+
+```bash
+cdn-link-gen setup
+```
+
+It walks you through token, commits-per-SVG, CDN selection, output format, and validation — then saves everything to `~/.cdn_settings.json`. Later runs reuse those choices automatically; command-line flags always override saved settings (`-validate` forces validation back on when it's saved off).
+
+Running `cdn-link-gen` with no arguments opens an interactive menu (generate, tokens, settings, PATH fix, demo).
 
 ## Google Cloud Shell
 
@@ -34,13 +49,21 @@ git clone https://github.com/Real-Nightmare/cdn-link-generator.git
 cd cdn-link-generator
 ./install.sh
 
-# Or skip the installer and build directly:
-go build -o cdn-link-gen .
+# Works immediately in the repo folder:
+./cdn-link-gen token add
+./cdn-link-gen generate owner/repo -y
+
+# After `source ~/.bashrc` (or a new shell), also works from anywhere:
+cdn-link-gen token add
+cdn-link-gen generate owner/repo -y
 ```
 
-Then:
+> Cloud Shell doesn't have `~/.local/bin` on PATH by default. The installer adds it to `~/.bashrc` for you — either `source ~/.bashrc` or start a new shell once, then use the bare command anywhere.
+
+Or skip the installer and build directly:
 
 ```bash
+go build -o cdn-link-gen .
 ./cdn-link-gen token add
 ./cdn-link-gen generate owner/repo -y
 ```
@@ -148,8 +171,10 @@ The container runs as a non-root user with `ca-certificates` and `git` included.
 
 ```bash
 git pull origin main
-go build -o cdn-link-gen .     # or: make build
+./install.sh    # rebuilds + reinstalls in one step; repo copy ./cdn-link-gen refreshed too
 ```
+
+Settings and tokens survive updates (`~/.cdn_settings.json`, `~/.cdn_tokens.json`).
 
 Binary version: `cdn-link-gen version`
 
@@ -180,10 +205,10 @@ chmod +x cdn-link-gen
 
 ### "Permission denied" when installing to /usr/local/bin
 
-The installer falls back to `~/.local/bin` automatically. Make sure it's on your PATH:
+The installer falls back to `~/.local/bin` automatically and adds it to your shell profile. To use it in your **current** shell right away:
 
 ```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+source ~/.bashrc      # or: export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ### "Token authentication failed"

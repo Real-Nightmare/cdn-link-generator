@@ -34,6 +34,12 @@
 - Flags for commits, CDNs, output file, format (txt/csv), concurrency
 - Works with `GITHUB_TOKEN` env var or stored tokens — or even unauthenticated for public repos
 
+🖥️ **Interactive UI & Persistent Settings**
+- Run `cdn-link-gen` with no arguments for a full interactive menu
+- `setup` wizard saves your preferences permanently to `~/.cdn_settings.json`
+- Every run remembers your choices — future runs reuse them automatically
+- `fix-path` installs the binary on your PATH and makes the fix permanent in your shell profile
+
 💾 **Secure Token Management**
 - Up to 10 GitHub tokens
 - Hidden input when adding (no shoulder surfing)
@@ -48,17 +54,38 @@
 curl -fsSL https://raw.githubusercontent.com/Real-Nightmare/cdn-link-generator/main/install.sh | sh
 ```
 
-The installer finds or installs Go automatically (linux/macOS, amd64/arm64/arm), builds the binary, and installs it to your PATH.
+The installer finds or installs Go automatically (linux/macOS, amd64/arm64/arm), builds the binary, **copies** it to your PATH (the repo copy keeps working too), and permanently fixes your shell profile PATH when needed.
 
+Or skip the installer entirely:
+
+```bash
+go build -o cdn-link-gen .
+./cdn-link-gen fix-path    # installs to PATH + permanent profile fix
+```
+
+### First-Run Setup (recommended)
+
+```bash
+cdn-link-gen setup    # interactive wizard — token, CDNs, format, validation
+```
+
+Everything you pick is saved to `~/.cdn_settings.json` and reused automatically. Running `cdn-link-gen` with no arguments opens the interactive menu instead.
 ### Google Cloud Shell
 
 ```bash
 git clone https://github.com/Real-Nightmare/cdn-link-generator.git
 cd cdn-link-generator
 ./install.sh
+
+# The binary works from the repo folder immediately:
+./cdn-link-gen token add
+./cdn-link-gen generate owner/repo -y
+
+# Or, after sourcing your profile / opening a new shell, from anywhere:
+cdn-link-gen generate owner/repo -y
 ```
 
-### Build from Source
+The installer **copies** the binary to your PATH (the repo copy stays put), and automatically adds the install dir to your `~/.bashrc`/`~/.profile` if it's missing.
 
 ```bash
 # Prerequisite: Go 1.18+ (no go.sum needed — zero third-party deps)
@@ -139,6 +166,7 @@ cdn-link-gen generate owner/repo -y -no-validate
 | `-out file` | Output file path |
 | `-format txt\|csv` | Output format |
 | `-no-validate` | Skip link validation (fastest) |
+| `-validate` | Force validation on (overrides saved settings) |
 | `-y` | Skip confirmation prompt (automatic mode) |
 | `-c N` | Concurrent validation workers (default: 20) |
 | `-make-commits` | Create new commits in a repo you own, then generate links |
@@ -158,8 +186,12 @@ cdn-link-gen token clear
 ### Other Commands
 
 ```bash
-cdn-link-gen cdns      # list the 13 CDN providers
-cdn-link-gen demo      # simulated run, no GitHub access
+cdn-link-gen                # interactive menu (token, generate, settings, PATH fix)
+cdn-link-gen setup          # interactive setup wizard (saves everything)
+cdn-link-gen settings       # show saved settings
+cdn-link-gen fix-path       # install on PATH + permanent profile fix
+cdn-link-gen cdns           # list the 13 CDN providers
+cdn-link-gen demo           # simulated run, no GitHub access
 cdn-link-gen version
 cdn-link-gen --help
 ```

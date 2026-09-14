@@ -22,6 +22,7 @@ type options struct {
 	skipPrompt    bool // alias for yes in automatic mode
 	concurrency   int
 	makeCommits   bool
+	forceValidate bool // -validate: override saved validation=off
 }
 
 // ---------- Interactive mode (no flags) ----------
@@ -100,6 +101,12 @@ func automaticMode(repoArgs []string, opts *options) {
 // ---------- Shared workflow ----------
 
 func runWorkflow(repos []GitHubRepo, token string, opts *options) {
+	// Record the effective settings so future runs reuse them automatically.
+	repoStrs := make([]string, 0, len(repos))
+	for _, r := range repos {
+		repoStrs = append(repoStrs, r.Owner+"/"+r.Name)
+	}
+	persistRunSettings(opts, repoStrs)
 	fmt.Println(colorizeYellow("🔍 Scanning repositories for SVG files…"))
 
 	repoSVGs, repoErrs := getAllSVGFiles(repos, token)
