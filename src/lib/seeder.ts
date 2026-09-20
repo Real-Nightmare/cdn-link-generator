@@ -493,6 +493,95 @@ export async function runAutoCommit(repo: GitHubRepo, opts: AutoCommitOpts): Pro
 }
 
 /** Delete every .autogen/ file the artificial commits created (cleanup). */
+// ---------------------------------------------------------------------------
+// 3. SVG cloner — copy selected SVGs from any source repo into a writable one
+// ---------------------------------------------------------------------------
+
+import type { RepoFile } from "./github";
+
+export interface CloneSvgsResult {
+  cloned: number;
+  failed: { path: string; error: string }[];
+}
+
+/**
+ * Clone the selected SVGs from `source` into `target` (the target must be
+ * writable by the token — pass a fork when the source isn't). Blob SHAs from
+ * the source tree scan are reused when possible (no re-upload); missing SHAs
+ * fall back to fetching content. Files land under `cloned/` in ONE commit per
+ * batch (fast, no history spam).
+ */
+export async function cloneSvgs(
+  source: { repo: GitHubRepo; files: RepoFile[] },
+  target: GitHubRepo,
+  opts: Opts,
+  destDir = "cloned",
+): Promise<CloneSvgsResult> {
+  if (source.files.length === 0) throw new SeedError("No SVGs selected to clone");
+  const { headSha, treeSha } = await getRef(target, opts.token, opts.branch);
+
+  // Target repo stores the same git objects — a source blob SHA resolves as-is.
+  // (Git SHAs are content-addressed, so identical content = identical SHA.)
+  const entries: { path: string; sha: string }[] = [];
+  const needContent: RepoFile[] = [];
+  const seen = new Set<string>();
+  for (const f of source.files) {
+    if (f.sha) {
+      if (!seen.has(f.sha)) {
+        entries.push({ path: `${destDir}/${f.path.split("/").pop()}`, sha: f.sha });
+        seen.add(f.sha);
+      }
+    } else {
+      needContent.push(f);
+    }
+  }
+
+  let head = headSha;
+  let tree = treeSha;
+  const failed: { path: string; error: string }[] = [];
+  let done = 0;
+  const total = source.files.length;
+
+  // Blobs without SHAs: fetch each file's content and upload.
+  for (const f of needContent) {
+    if (opts.shouldAbort?.()) break;
+    try {
+      const resp = await fetch(
+        `https://api.github.com/repos/${source.repo.owner}/${source.repo.name}/contents/${f.path}`,
+        { headers: { Accept: "application/vnd.github.raw+json", ...(opts.token ? { Authorization: `token ${opts.token}` } : {}) } },
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+      const sha = await createBlob(target, opts.token, text);
+      entries.push({ path: `${destDir}/${f.path.split("/").pop()}`, sha });
+    } catch (err) {
+      failed.push({ path: f.path, error: err instanceof Error ? err.message : String(err) });
+    }
+    done++;
+    opts.onProgress?.(done, total, `Fetched ${done}/${total} files without SHAs…`);
+  }
+
+  if (entries.length === 0) {
+    throw new SeedError(`Nothing could be cloned${failed.length ? ` — ${failed.length} file(s) failed` : ""}`);
+  }
+
+  // One tree+commit for everything (bounded in case of very large selections).
+  const BATCH = 500;
+  for (let i = 0; i < entries.length; i += BATCH) {
+    if (opts.shouldAbort?.()) break;
+    const batch = entries.slice(i, i + BATCH);
+    opts.onProgress?.(done, total, `Committing ${batch.length} cloned files…`);
+    tree = await createTree(target, opts.token, tree, batch.map((e) => ({ path: e.path, mode: "100644", type: "blob", sha: e.sha })));
+    head = await createCommit(target, opts.token, `clone: add ${batch.length} SVGs from ${source.repo.owner}/${source.repo.name}`, tree, [head]);
+    await updateRef(target, opts.token, opts.branch, head);
+    done += batch.length;
+    opts.onProgress?.(Math.min(done, total), total, `Cloned ${Math.min(done, total)}/${total} files…`);
+    if (i + BATCH < entries.length) await sleep(400);
+  }
+
+  return { cloned: entries.length, failed };
+}
+
 export async function purgeAutogen(repo: GitHubRepo, opts: Opts): Promise<number> {
   const { headSha, treeSha } = await getRef(repo, opts.token, opts.branch);
   const filesRes = await fetch(

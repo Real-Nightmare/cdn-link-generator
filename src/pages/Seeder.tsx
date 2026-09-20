@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { CreateRepositoryCard } from "../components/CreateRepositoryCard";
+import { SvgClonerCard } from "../components/SvgClonerCard";
 import { ProgressBar, Spinner } from "../components/ui";
 import { GitHubRepo, parseRepoURL } from "../lib/github";
 import { readStoredToken } from "../lib/settings";
@@ -216,6 +217,19 @@ export default function Seeder() {
               setRepoText(fullName);
               setBranch(defaultBranch);
             }}
+          />
+
+          {/* SVG Cloner — pick SVGs out of any repo; auto-forks when the
+              token can't push to the source. */}
+          <SvgClonerCard
+            busy={busy}
+            targetRepo={parsed.repo}
+            branch={branch}
+            onBusyChange={setCreating}
+            onError={setError}
+            onLog={addLog}
+            onProgress={setProgress}
+            onCloned={({ fullName }) => setRepoText(fullName)}
           />
 
           {/* Seed section */}

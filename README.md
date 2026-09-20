@@ -21,6 +21,7 @@ The **Seeder** page writes to your repos straight from the browser (token needs 
 
 - **SVG Seeder** — paste any SVG, choose 1–**10,000** copies, and it lands in the repo as that many files (`.autogen/`-style batched commits of 500 files each). Identical content is uploaded **once** as a single blob and referenced by every tree entry, so 10,000 files cost the bandwidth of one. Flat or nested layout.
 - **Create repository** — spin up a new repo on your account straight from the page; it lands in the target fields ready to seed.
+- **SVG Cloner** — scan any repo for its `.svg` files, tick the ones you want, and clone them into the target repo in one batched commit. If the token can't push to the source repo (a different account), the cloner **forks it to your account first** and clones from the fork — Git's content-addressed blobs make the copy free.
 - **Artificial commits** — forge 1–**50** real commits that alternate adding and removing a tiny marker file under `.autogen/` (customizable base name, and they can target a new or existing branch), creating genuine history and SHAs that every CDN link can point at. Auto-commit mode keeps forging on a timer (1–60s) until you stop it or the cap is hit. One-click purge removes everything the feature created.
 
 ### Supported providers (24)

@@ -105,6 +105,17 @@ function getWorker(): Worker {
   return worker as Worker;
 }
 
+/** Strip values that can't survive structured clone (functions, DOM nodes).
+ * Callers pass progress callbacks alongside data; without this every post
+ * throws "could not be cloned" in a real browser. */
+function cloneable<T extends Record<string, unknown>>(args: T): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v !== "function") out[k] = v;
+  }
+  return out;
+}
+
 function call<T>(
   type: string,
   args: Record<string, unknown>,
@@ -114,7 +125,12 @@ function call<T>(
   const w = getWorker();
   return new Promise<T>((resolve, reject) => {
     pending.set(gen, { resolve: resolve as (v: unknown) => void, reject, onProgress });
-    w.postMessage({ type, gen, ...args });
+    try {
+      w.postMessage({ type, gen, ...cloneable(args) });
+    } catch (err) {
+      pending.delete(gen);
+      reject(new Error(`Failed to start background task: ${err instanceof Error ? err.message : String(err)}`));
+    }
   });
 }
 

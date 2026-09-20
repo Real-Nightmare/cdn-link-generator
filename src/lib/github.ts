@@ -11,6 +11,8 @@ export interface RepoFile {
   path: string;
   type: string;
   size: number;
+  /** Git blob SHA — lets the cloner reuse existing blobs without re-uploading. */
+  sha?: string;
 }
 
 export class GitHubError extends Error {
@@ -44,14 +46,17 @@ export function parseRepoURL(repoStr: string): GitHubRepo {
 interface FetchOpts {
   method?: string;
   token?: string;
+  headers?: Record<string, string>;
+  body?: string;
 }
 
 async function ghFetch(path: string, opts: FetchOpts = {}): Promise<Response> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github.v3+json",
+    ...opts.headers,
   };
   if (opts.token) headers.Authorization = `token ${opts.token}`;
-  return fetch(API_BASE + path, { method: opts.method ?? "GET", headers });
+  return fetch(API_BASE + path, { method: opts.method ?? "GET", headers, body: opts.body });
 }
 
 /** Request with retry on transient network/5xx failures. */
@@ -80,6 +85,9 @@ async function ghFetchRetry(path: string, opts: FetchOpts = {}): Promise<Respons
 export async function getSVGFiles(repo: GitHubRepo, token?: string): Promise<{
   files: string[];
   truncated: boolean;
+  /** Full blob entries (path + sha) for every .svg — blob SHAs let the cloner
+   * reference the source blobs directly in new trees. */
+  tree: RepoFile[];
 }> {
   const resp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/git/trees/HEAD?recursive=1`, {
     token,
@@ -107,7 +115,7 @@ export async function getSVGFiles(repo: GitHubRepo, token?: string): Promise<{
   const files = (tree.tree ?? [])
     .filter((f) => f.type === "blob" && f.path.toLowerCase().endsWith(".svg"))
     .map((f) => f.path);
-  return { files, truncated: tree.truncated === true };
+  return { files, truncated: tree.truncated === true, tree: tree.tree ?? [] };
 }
 
 /**
@@ -226,6 +234,132 @@ export async function getRateLimit(token?: string): Promise<{
     resources: { core: { remaining: number; limit: number } };
   };
   return { remaining: rl.resources.core.remaining, limit: rl.resources.core.limit };
+}
+
+// ---------------------------------------------------------------------------
+// Write access, forking, and blob access (SVG Cloner support)
+// ---------------------------------------------------------------------------
+
+export interface ForkResult {
+  fullName: string;
+  htmlUrl: string;
+  defaultBranch: string;
+}
+
+/**
+ * True when the token's account can push to `repo` (owns it, collaborates, or
+ * has org write). Without a token, only same-account writes are unknowable —
+ * treat everything as non-writable since seeding requires auth anyway.
+ */
+export async function checkWriteAccess(repo: GitHubRepo, token: string): Promise<boolean> {
+  if (!token) return false;
+  const resp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}`, { token });
+  if (!resp.ok) {
+    if (resp.status === 404) throw new GitHubError(`Repo ${repo.owner}/${repo.name} not found (or private and the token can't see it)`, 404);
+    throw new GitHubError(`Repo lookup failed (HTTP ${resp.status})`, resp.status);
+  }
+  const info = (await resp.json()) as { permissions?: { push?: boolean } };
+  return info.permissions?.push === true;
+}
+
+/**
+ * Fork a repo into the token's account. The API returns immediately (the fork
+ * is still being provisioned), so we poll the fork's default branch until the
+ * ref exists — that's the signal the fork is ready to accept pushes.
+ */
+export async function forkRepository(
+  repo: GitHubRepo,
+  token: string,
+  onProgress?: (label: string) => void,
+): Promise<ForkResult> {
+  const resp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/forks`, { method: "POST", token });
+  if (!resp.ok) {
+    if (resp.status === 403) {
+      throw new GitHubError("Token can't create forks (needs a private-fork-capable scope, or the source forbids forks)", 403);
+    }
+    if (resp.status === 404) {
+      throw new GitHubError(`Repo ${repo.owner}/${repo.name} not found`, 404);
+    }
+    throw new GitHubError(`Fork failed (HTTP ${resp.status})`, resp.status);
+  }
+  const fork = (await resp.json()) as { full_name: string; html_url: string; default_branch: string };
+  onProgress?.(`Fork ${fork.full_name} created — waiting for it to be ready…`);
+
+  // Poll until the fork's default branch ref exists (fork is push-ready).
+  const branch = fork.default_branch || "main";
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, i < 5 ? 1000 : 3000));
+    const probe = await ghFetch(`/repos/${fork.full_name}/git/ref/heads/${branch}`, { token });
+    if (probe.ok) {
+      onProgress?.(`Fork ${fork.full_name} is ready (branch ${branch}).`);
+      return { fullName: fork.full_name, htmlUrl: fork.html_url, defaultBranch: branch };
+    }
+  }
+  throw new GitHubError(`Fork ${fork.full_name} didn't become ready within 3 minutes — open it on GitHub and retry`);
+}
+
+/** Fetch one file's raw content via the blob API (base64 → text). */
+export async function getBlob(repo: GitHubRepo, sha: string, token?: string): Promise<string> {
+  const resp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/git/blobs/${sha}`, { token });
+  if (!resp.ok) throw new GitHubError(`Blob fetch failed (HTTP ${resp.status})`, resp.status);
+  const j = (await resp.json()) as { content?: string; encoding?: string };
+  if (j.encoding !== "base64" || !j.content) throw new GitHubError("Unexpected blob encoding");
+  const bytes = Uint8Array.from(atob(j.content.replace(/\s/g, "")), (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+export async function createBlob(repo: GitHubRepo, token: string, content: string): Promise<string> {
+  const resp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/git/blobs`, {
+    method: "POST",
+    token,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, encoding: "utf-8" }),
+  });
+  if (!resp.ok) {
+    if (resp.status === 403) throw new GitHubError("Token lacks write access to this repo (needs Contents: read & write)", 403);
+    throw new GitHubError(`Blob create failed (HTTP ${resp.status})`, resp.status);
+  }
+  const j = (await resp.json()) as { sha: string };
+  return j.sha;
+}
+
+export interface CloneCommitOpts {
+  baseTree: string;
+  head: string;
+  entries: { path: string; sha: string }[];
+  message: string;
+}
+
+/** One tree+commit+ref update for the cloner (all entry SHAs are blobs). */
+export async function commitTreeEntries(
+  repo: GitHubRepo,
+  token: string,
+  branch: string,
+  opts: CloneCommitOpts,
+): Promise<{ head: string; tree: string }> {
+  const treeResp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/git/trees`, {
+    method: "POST",
+    token,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_tree: opts.baseTree, tree: opts.entries.map((e) => ({ path: e.path, mode: "100644", type: "blob", sha: e.sha })) }),
+  });
+  if (!treeResp.ok) throw new GitHubError(`Tree create failed (HTTP ${treeResp.status})`, treeResp.status);
+  const tree = (await treeResp.json()) as { sha: string };
+  const commitResp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/git/commits`, {
+    method: "POST",
+    token,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: opts.message, tree: tree.sha, parents: [opts.head] }),
+  });
+  if (!commitResp.ok) throw new GitHubError(`Commit create failed (HTTP ${commitResp.status})`, commitResp.status);
+  const commit = (await commitResp.json()) as { sha: string };
+  await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/git/refs/heads/${branch.replace(/[^\w./-]/g, "")}`, {
+    method: "PATCH",
+    token,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sha: commit.sha }),
+  });
+  return { head: commit.sha, tree: tree.sha };
 }
 
 // ---------------------------------------------------------------------------
