@@ -26,7 +26,14 @@ import {
   downloadBuffer,
   pipeline,
 } from "../workers/pipeline-client";
-import { AppSettings, DownloadScope, loadSettings, saveSettings } from "../lib/settings";
+import {
+  AppSettings,
+  DownloadScope,
+  loadSettings,
+  MAX_URL_BUDGET_CLAMP,
+  MIN_URL_BUDGET,
+  saveSettings,
+} from "../lib/settings";
 import { ProgressBar, Spinner, StatCard } from "../components/ui";
 
 type RunState = "idle" | "running" | "done";
@@ -95,6 +102,7 @@ export default function Generator() {
   const [concurrency, setConcurrency] = useState(initial.concurrency);
   const [downloadScope, setDownloadScope] = useState<DownloadScope>(initial.downloadScope);
   const [bunnyZoneInput, setBunnyZoneInput] = useState(initial.bunnyZone);
+  const [urlBudget, setUrlBudget] = useState(initial.urlBudget);
   const [token, setToken] = useState(initial.token);
 
   const [runState, setRunState] = useState<RunState>("idle");
@@ -129,6 +137,9 @@ export default function Generator() {
   const [tableLoading, setTableLoading] = useState(false);
 
   const [watchdogFired, setWatchdogFired] = useState(false);
+  // Big-run notices: Gofile offload links for huge exports and the
+  // validation-skipped note at extreme link counts.
+  const [notice, setNotice] = useState<{ kind: "info" | "link"; text: string; url?: string } | null>(null);
   const [pages, setPages] = useState<
     | { kind: "idle" }
     | { kind: "checking" }
@@ -198,9 +209,10 @@ export default function Generator() {
       lastPreset: preset?.id ?? "custom",
       downloadScope,
       bunnyZone: bunnyZoneInput,
+      urlBudget,
     };
     saveSettings(settings);
-  }, [token, commitsPerSVG, selectedCDNs, concurrency, validate, npmPkg, downloadScope, bunnyZoneInput, initial.lastRepos]);
+  }, [token, commitsPerSVG, selectedCDNs, concurrency, validate, npmPkg, downloadScope, bunnyZoneInput, urlBudget, initial.lastRepos]);
 
   // Watchdog: if no progress event fires for 3 minutes mid-run, surface a
   // "still working" card instead of a silent black screen.
@@ -328,6 +340,7 @@ export default function Generator() {
     setLinksOpen(false);
     setTableRows([]);
     setTableShown(0);
+    setNotice(null);
     setRunState("running");
 
     try {
@@ -340,6 +353,7 @@ export default function Generator() {
         cdnSelection: selectedCDNs.map(String),
         token: token.trim(),
         bunnyZone: bunnyReady() ? bunnyZoneInput.trim() : "",
+        urlBudget,
         onProgress: setProgress,
       });
       setSummary(res);
@@ -360,6 +374,7 @@ export default function Generator() {
           lastPreset: "custom",
           downloadScope,
           bunnyZone: bunnyZoneInput,
+          urlBudget,
         });
       }
 
@@ -372,6 +387,12 @@ export default function Generator() {
             onProgress: (done, total) => setValProgress({ done, total }),
           });
           setSummary((s) => (s ? { ...s, validCount: v.validCount, brokenCount: v.brokenCount } : s));
+          if (v.skipped) {
+            setNotice({
+              kind: "info",
+              text: `Validation skipped — ${res.totalUrls.toLocaleString()} links exceeds the validation cap. Downloads still include every link.`,
+            });
+          }
         } catch {
           // best-effort — counts stay at zero
         } finally {
@@ -433,6 +454,11 @@ export default function Generator() {
         scope: downloadScope,
         filename: `cdn_links_${name}${suffix}_${timestamp()}.${kind}`,
       });
+      if (filename.startsWith("GOFILE:")) {
+        setNotice({ kind: "link", text: `Export too large for a direct download — uploaded to Gofile.io:`, url: filename.slice(7) });
+        return;
+      }
+      if (!buf) throw new Error("Export returned no data");
       downloadBuffer(buf, filename, mime);
     } catch (err) {
       setFatalError(err instanceof Error ? err.message : String(err));
@@ -447,6 +473,11 @@ export default function Generator() {
         filename: `unblocked_by_${filterName.replace(/[^\w.-]+/g, "-")}_${timestamp()}.txt`,
         filterName,
       });
+      if (filename.startsWith("GOFILE:")) {
+        setNotice({ kind: "link", text: `Export too large for a direct download — uploaded to Gofile.io:`, url: filename.slice(7) });
+        return;
+      }
+      if (!buf) throw new Error("Export returned no data");
       downloadBuffer(buf, filename, "text/plain");
     } catch (err) {
       setFilterError(err instanceof Error ? err.message : String(err));
@@ -592,6 +623,31 @@ export default function Generator() {
               ))}
             </select>
           </div>
+
+          {mode === "repo" && (
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-slate-200">
+                Link memory budget
+              </label>
+              <input
+                type="number"
+                min={MIN_URL_BUDGET}
+                max={MAX_URL_BUDGET_CLAMP}
+                step={100000}
+                value={urlBudget}
+                onChange={(e) =>
+                  setUrlBudget(
+                    Math.max(MIN_URL_BUDGET, Math.min(MAX_URL_BUDGET_CLAMP, Math.floor(Number(e.target.value) || 0))),
+                  )
+                }
+                className="input-base font-mono"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                Above {urlBudget.toLocaleString()} links, commit history is sampled (newest commit always kept).
+                Max 50M — beyond the default, huge runs rely on streaming + Gofile offload for exports.
+              </p>
+            </div>
+          )}
 
           <div>
             <div className="mb-2 flex items-center justify-between">
@@ -1025,7 +1081,18 @@ export default function Generator() {
                 {summary.sampled && (
                   <p className="mt-2 text-xs text-warn">
                     ⚠ Huge repo: commit history was sampled so the run fits in memory — links still cover every SVG,
-                    spread across the history. Lower "Commits per SVG" for full-depth history.
+                    spread across the history. Lower "Commits per SVG" or raise the link memory budget for full depth.
+                  </p>
+                )}
+                {notice?.kind === "info" && (
+                  <p className="mt-2 text-xs text-accent">ℹ {notice.text}</p>
+                )}
+                {notice?.kind === "link" && (
+                  <p className="mt-2 text-xs text-accent">
+                    ☁ {notice.text}{" "}
+                    <a href={notice.url} target="_blank" rel="noreferrer" className="underline hover:text-accent-soft">
+                      open download link
+                    </a>
                   </p>
                 )}
               </div>

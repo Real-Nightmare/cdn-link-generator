@@ -95,6 +95,11 @@ function getWorker(): Worker {
         entry.resolve(msg.text ?? "");
       } else if (msg.type === "export") {
         entry.resolve({ buf: msg.buf, filename: msg.filename });
+      } else if (msg.type === "exportProgress") {
+        // One-off status note (validation skipped, Gofile upload started).
+        // Console only — the UI surfaces outcomes via results/filenames.
+        const p = msg.payload as { message?: string } | undefined;
+        if (p?.message) console.info(`[worker] ${p.message}`);
       }
     };
     w.onerror = (ev) => {
@@ -150,6 +155,8 @@ export const pipeline = {
     cdnSelection: string[];
     token: string;
     bunnyZone: string;
+    /** Max URL objects the worker may hold (commit sampling threshold). */
+    urlBudget: number;
     onProgress: (p: GenProgressPayload) => void;
   }): Promise<RunSummary> {
     return call<RunSummary>("generate", args, (kind, payload) => {
@@ -160,13 +167,13 @@ export const pipeline = {
   validate(args: {
     concurrency: number;
     onProgress: (done: number, total: number) => void;
-  }): Promise<{ validCount: number; brokenCount: number }> {
+  }): Promise<{ validCount: number; brokenCount: number; skipped?: boolean }> {
     return call("validate", { concurrency: args.concurrency }, (kind, payload) => {
       if (kind === "validate") {
         const p = payload as { done: number; total: number };
         args.onProgress(p.done, p.total);
       }
-    }) as Promise<{ validCount: number; brokenCount: number }>;
+    }) as Promise<{ validCount: number; brokenCount: number; skipped?: boolean }>;
   },
 
   runFilters(args: {
