@@ -31,8 +31,12 @@ interface WorkerState {
   validSet: Set<string>;
   brokenSet: Set<string>;
   filterResults: DomainFilterResult[] | null;
-  filterSafeSet: Set<string>;
+  /** URLs flagged at their serving URL — the SMALL set. (The old safe-set
+   * held every unflagged URL: on million-link runs that's a second copy of
+   * the dataset in memory. Reverse containment is O(blocked), tiny.) */
+  filterBlockedSet: Set<string>;
   filterSafeCount: number;
+  filterSampled: boolean;
 }
 
 const state: WorkerState = {
@@ -42,8 +46,9 @@ const state: WorkerState = {
   validSet: new Set(),
   brokenSet: new Set(),
   filterResults: null,
-  filterSafeSet: new Set(),
+  filterBlockedSet: new Set(),
   filterSafeCount: 0,
+  filterSampled: false,
 };
 
 let abortFlag = false;
@@ -83,18 +88,19 @@ function recountState(): void {
   state.uniqueSvgCount = paths.size;
 }
 
-/** Rebuild the filter-safe URL set from the current per-serving-URL verdicts. */
-function rebuildSafeSet(): void {
-  state.filterSafeSet = new Set();
+/** Rebuild the filter BLOCKED-URL set (the small one) and the safe count
+ * from the current per-serving-URL verdicts. */
+function rebuildFilterSets(): void {
+  state.filterBlockedSet = new Set();
   if (state.filterResults && state.result) {
     const blocked = new Set(state.filterResults.filter((r) => r.blocked).map((r) => r.domain));
     for (const l of state.result.links) {
       for (const u of l.urls) {
-        if (!blocked.has(hostOf(u.url))) state.filterSafeSet.add(u.url);
+        if (blocked.has(hostOf(u.url))) state.filterBlockedSet.add(u.url);
       }
     }
   }
-  state.filterSafeCount = state.filterSafeSet.size;
+  state.filterSafeCount = state.totalUrls - state.filterBlockedSet.size;
 }
 
 function resetForNewRun(): void {
@@ -105,8 +111,9 @@ function resetForNewRun(): void {
   state.validSet = new Set();
   state.brokenSet = new Set();
   state.filterResults = null;
-  state.filterSafeSet = new Set();
+  state.filterBlockedSet = new Set();
   state.filterSafeCount = 0;
+  state.filterSampled = false;
 }
 
 /** Lazy scoped URL iterator — never materializes the full array. */
@@ -114,7 +121,7 @@ function* scopedUrls(scope: string): Generator<string> {
   if (!state.result) return;
   for (const l of state.result.links) {
     for (const u of l.urls) {
-      if (scope === "valid" ? state.validSet.has(u.url) : scope === "safe" ? state.filterSafeSet.has(u.url) : true) {
+      if (scope === "valid" ? state.validSet.has(u.url) : scope === "safe" ? !state.filterBlockedSet.has(u.url) : true) {
         yield u.url;
       }
     }
@@ -126,7 +133,7 @@ function* scopedRows(scope: string): Generator<ExportRow> {
   if (!state.result) return;
   for (const l of state.result.links) {
     for (const u of l.urls) {
-      if (scope === "valid" ? state.validSet.has(u.url) : scope === "safe" ? state.filterSafeSet.has(u.url) : true) {
+      if (scope === "valid" ? state.validSet.has(u.url) : scope === "safe" ? !state.filterBlockedSet.has(u.url) : true) {
         yield {
           source: l.repo,
           path: l.path,
@@ -147,7 +154,7 @@ function* scopedJsonLinks(scope: string): Generator<JsonLink> {
   for (const l of state.result.links) {
     const urls = l.urls
       .filter((u) =>
-        scope === "valid" ? state.validSet.has(u.url) : scope === "safe" ? state.filterSafeSet.has(u.url) : true,
+        scope === "valid" ? state.validSet.has(u.url) : scope === "safe" ? !state.filterBlockedSet.has(u.url) : true,
       )
       .map((u) => ({ provider: u.provider.name, domain: u.provider.domain, url: u.url }));
     if (urls.length === 0) continue;
@@ -203,6 +210,7 @@ async function runGenerate(msg: {
       brokenCount: 0,
       filterSafeCount: state.filterSafeCount,
       aborted: abortFlag,
+      sampled: state.result.sampled === true,
     },
   });
 }
@@ -237,29 +245,67 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
     return;
   }
   abortFlag = false;
-  const urls: string[] = [];
-  for (const u of scopedUrls("all")) urls.push(u);
+  // Stream URLs straight into the planner — no materialized URL array (the
+  // old [...scopedUrls("all")] doubled memory before probing even started).
   try {
-    const results = await checkDomains(urls, Math.min(Math.max(msg.concurrency, 2), 24), postFilterProgress, shouldAbort);
+    const { results, sampled } = await checkDomains(
+      scopedUrls("all"),
+      Math.min(Math.max(msg.concurrency, 2), 24),
+      postFilterProgress,
+      shouldAbort,
+    );
     if (results.length > 0) state.filterResults = results;
-    rebuildSafeSet();
-    // Per-filter unblocked counts in one pass (worker-side, off the UI).
+    state.filterSampled = sampled;
+    rebuildFilterSets();
+
+    // Per-filter unblocked counts. Precompute each target's per-filter verdict
+    // index once (the runner merges host + path verdicts per target); counting
+    // then runs in O(urls × filters) with NO .find() per filter per URL.
     const unblockedCounts: Record<string, number> = {};
     for (const f of FILTER_DEFS) unblockedCounts[f.name] = 0;
     const byDomain = new Map((state.filterResults ?? []).map((r) => [r.domain, r] as const));
+    const verdictIdx = new Map<DomainFilterResult, Record<string, { blocked: boolean; error?: string }>>();
+    const lookup = (r: DomainFilterResult) => {
+      let v = verdictIdx.get(r);
+      if (!v) {
+        v = {};
+        for (const e of r.results) v[e.name] = e;
+        verdictIdx.set(r, v);
+      }
+      return v;
+    };
     for (const l of state.result?.links ?? []) {
       for (const u of l.urls) {
         const dr = byDomain.get(hostOf(u.url));
+        if (!dr) {
+          // Unsampled target: host-level engines still decided it — use the
+          // host probe's verdicts so counts include URLs never path-probed.
+          const hostEntry = byDomain.get(hostOf(u.url).split("/")[0].toLowerCase());
+          if (hostEntry) {
+            const v = lookup(hostEntry);
+            for (const f of FILTER_DEFS) {
+              const e = v[f.name];
+              if (!e || e.error || !e.blocked) unblockedCounts[f.name]++;
+            }
+          }
+          continue;
+        }
+        const v = lookup(dr);
         for (const f of FILTER_DEFS) {
-          const entry = dr?.results.find((x) => x.name === f.name);
-          if (!dr || !entry || entry.error || !entry.blocked) unblockedCounts[f.name]++;
+          const e = v[f.name];
+          if (!e || e.error || !e.blocked) unblockedCounts[f.name]++;
         }
       }
     }
     post({
       type: "done",
       gen: msg.gen,
-      payload: { results: state.filterResults ?? [], filterSafeCount: state.filterSafeCount, unblockedCounts },
+      payload: {
+        results: state.filterResults ?? [],
+        filterSafeCount: state.filterSafeCount,
+        unblockedCounts,
+        sampled,
+      },
     });
   } catch (err) {
     post({ type: "error", gen: msg.gen, message: err instanceof Error ? err.message : String(err) });
@@ -268,7 +314,7 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
 
 function statusOf(url: string, validateOn: boolean): "ok" | "bad" | "blocked" | "pending" | "off" {
   if (state.brokenSet.has(url)) return "bad";
-  if (state.filterResults && !state.filterSafeSet.has(url)) return "blocked";
+  if (state.filterResults && state.filterBlockedSet.has(url)) return "blocked";
   if (state.validSet.has(url)) return "ok";
   return validateOn ? "pending" : "off";
 }

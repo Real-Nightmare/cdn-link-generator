@@ -119,7 +119,7 @@ export async function getSVGFiles(repo: GitHubRepo, token?: string): Promise<{
 }
 
 /**
- * Fetch the file tree of ONE commit (paths of blobs only).
+ * Fetch the file tree of ONE commit — .svg blob paths only.
  * Empty trees (no tree entry) throw — callers treat that as "no SVGs here".
  */
 export async function getTreeForCommit(
@@ -133,7 +133,11 @@ export async function getTreeForCommit(
   );
   if (!resp.ok) throw new GitHubError(`Tree fetch failed for ${sha.slice(0, 7)} (HTTP ${resp.status})`, resp.status);
   const tree = (await resp.json()) as { tree?: RepoFile[] };
-  return new Set((tree.tree ?? []).filter((f) => f.type === "blob").map((f) => f.path));
+  return new Set(
+    (tree.tree ?? [])
+      .filter((f) => f.type === "blob" && f.path.toLowerCase().endsWith(".svg"))
+      .map((f) => f.path),
+  );
 }
 
 /**
@@ -141,6 +145,9 @@ export async function getTreeForCommit(
  * a Map of commit → Set of SVG paths actually present at that commit. Old
  * commits only get an SVG link if that SVG existed at the time — no more 404
  * links for files that were added later or deleted since.
+ *
+ * Only .svg paths are kept: recursive trees of large repos can have tens of
+ * thousands of entries each, and every non-SVG entry was dead weight.
  */
 export async function getCommitTrees(
   repo: GitHubRepo,

@@ -2,7 +2,7 @@
 // npm package mode (versions → package files → links). All client-side.
 
 import { CDNProvider, generateCDNLink, selectCDNs, bunnyReady } from "./cdns";
-import { GitHubRepo, getCommitSHAs, getPackageSVGs, getSVGFiles, getCommitTrees } from "./github";
+import { GitHubRepo, getCommitSHAs, getPackageSVGs, getSVGFiles, getTreeForCommit } from "./github";
 
 export interface GenOptions {
   commitsPerSVG: number; // 0 = all fetched commits (repo mode)
@@ -33,6 +33,33 @@ export interface GenResult {
   repos: RepoResult[];
   links: GeneratedLink[];
   truncated: boolean;
+  /** True when commit history was sampled (files × commits × providers would
+   * have blown the memory budget). The summary message says so. */
+  sampled?: boolean;
+}
+
+/** Hard memory budget on the number of URL objects the worker holds. 10k
+ * files × 100 commits × 24 providers ≈ 24M URLs → OOM = silent death (the
+ * "stuck at loading" report). Above this, commits are sampled so links
+ * still cover every SVG across the repo's history. */
+export const MAX_URL_BUDGET = 2_000_000;
+
+/**
+ * Sample `shas` down so files × commits × providers stays inside the URL
+ * budget. Deterministic even sampling (never just the newest N, which would
+ * miss history); always keeps the newest commit.
+ */
+export function sampleCommits(fileCount: number, shas: string[], providerCount: number): { shas: string[]; sampled: boolean } {
+  if (fileCount === 0 || providerCount === 0) return { shas, sampled: false };
+  const perCommit = fileCount * providerCount;
+  const maxCommits = Math.max(1, Math.floor(MAX_URL_BUDGET / perCommit));
+  if (shas.length <= maxCommits) return { shas, sampled: false };
+  const stride = shas.length / maxCommits;
+  const picked: string[] = [];
+  for (let i = 0; i < maxCommits; i++) picked.push(shas[Math.floor(i * stride)]);
+  // Guarantee the newest commit is present (users check the live state).
+  if (!picked.includes(shas[0])) picked[0] = shas[0];
+  return { shas: picked, sampled: true };
 }
 
 /** Generate links for every SVG across every repo, streaming progress. */
@@ -75,42 +102,39 @@ export async function generateLinks(
         label: `Fetching commits for ${key}…`,
       });
       const count = opts.commitsPerSVG > 0 ? opts.commitsPerSVG : files.length;
-      const shas = await getCommitSHAs(repo, count, token);
+      let shas = await getCommitSHAs(repo, count, token);
       if (shas.length === 0) {
         result.repos.push({ repo: key, error: "no commits found", svgCount: files.length });
         continue;
       }
+      // Memory guard: 10k files × 100 commits × 24 providers would build
+      // ~24M URL objects and kill the worker. Sample commits, keep newest.
+      const { shas: usable, sampled } = sampleCommits(files.length, shas, providers.length);
+      shas = usable;
+      if (sampled) result.sampled = true;
 
-      // Phase 3: build links — one entry per SVG per commit, but SMART: every
-      // commit gets the tree it points at, so a link is only emitted when the
-      // SVG actually exists at that exact commit (deleted/renamed files no
-      // longer produce guaranteed-404 URLs).
+      // Phase 3: build links — STREAMED per commit: fetch ONE commit's .svg
+      // tree, emit its links, drop the tree. The old approach materialized
+      // every commit's tree up front (70 commits × 10k entries = hundreds of
+      // MB before a single link existed).
       onProgress({
         phase: "links",
         current: i + 1,
         total: repos.length,
         label: `Generating links for ${key}…`,
       });
-      const perCommit = await getCommitTrees(
-        repo,
-        shas,
-        token,
-        opts.commitsPerSVG === 0,
-        (done) => {
-          onProgress({
-            phase: "commits",
-            current: done,
-            total: shas.length,
-            label: `${key}: checking SVGs at commit ${done}/${shas.length}…`,
-          });
-        },
-        shouldAbort,
-      );
       const bunny = bunnyReady();
-      let done = 0;
-      for (const path of files) {
-        for (const sha of shas) {
-          if (!perCommit.get(sha)?.has(path)) continue; // SVG absent at this commit
+      let treeDone = 0;
+      let built = 0;
+      links: for (const sha of shas) {
+        if (shouldAbort?.()) return result;
+        let tree: Set<string>;
+        try {
+          tree = await getTreeForCommit(repo, sha, token);
+        } catch {
+          continue; // commit unreachable — no links from it
+        }
+        for (const path of tree) {
           const urls = providers
             .map((provider) => ({
               provider,
@@ -127,16 +151,16 @@ export async function generateLinks(
             .filter((u) => u.url !== "");
           if (urls.length === 0) continue;
           result.links.push({ repo: key, path, sha, urls });
+          built += urls.length;
+          if (built > MAX_URL_BUDGET * 1.2) break links; // hard safety stop
         }
-        done++;
-        if (done % 25 === 0 || done === files.length) {
-          onProgress({
-            phase: "links",
-            current: done,
-            total: files.length,
-            label: `${key}: ${done}/${files.length} SVGs`,
-          });
-        }
+        treeDone++;
+        onProgress({
+          phase: "links",
+          current: treeDone,
+          total: shas.length,
+          label: `${key}: commit ${treeDone}/${shas.length} — ${built.toLocaleString()} links so far`,
+        });
       }
     } catch (err) {
       result.repos.push({
@@ -153,7 +177,6 @@ export async function generateLinks(
   onProgress({ phase: "done", current: 1, total: 1, label: "Complete" });
   return result;
 }
-
 /**
  * npm package mode: every SVG inside the package's files, replicated across
  * the selected versions and every npm-capable provider.

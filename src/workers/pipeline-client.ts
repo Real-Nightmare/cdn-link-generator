@@ -20,6 +20,8 @@ export interface RunSummary {
   brokenCount: number;
   filterSafeCount: number;
   aborted: boolean;
+  /** Commit history was sampled to fit the URL budget — coverage note shown. */
+  sampled?: boolean;
 }
 
 export interface TablePage {
@@ -35,6 +37,9 @@ export interface FilterDone {
   }[];
   filterSafeCount: number;
   unblockedCounts: Record<string, number>;
+  /** Path probes were reservoir-sampled (huge runs); host-level verdicts
+   * still cover every URL. */
+  sampled?: boolean;
 }
 
 type ProgressHandler = (kind: "gen" | "validate" | "filters", payload: unknown) => void;
