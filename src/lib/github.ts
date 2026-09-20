@@ -48,7 +48,13 @@ interface FetchOpts {
   token?: string;
   headers?: Record<string, string>;
   body?: string;
+  /** Abort the request if it exceeds this many ms (default 30s). A hung
+   * request used to stall a whole generation run with no error — the
+   * "stuck at loading" report. */
+  timeoutMs?: number;
 }
+
+const GH_TIMEOUT_MS = 30_000;
 
 async function ghFetch(path: string, opts: FetchOpts = {}): Promise<Response> {
   const headers: Record<string, string> = {
@@ -56,7 +62,18 @@ async function ghFetch(path: string, opts: FetchOpts = {}): Promise<Response> {
     ...opts.headers,
   };
   if (opts.token) headers.Authorization = `token ${opts.token}`;
-  return fetch(API_BASE + path, { method: opts.method ?? "GET", headers, body: opts.body });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? GH_TIMEOUT_MS);
+  try {
+    return await fetch(API_BASE + path, {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Request with retry on transient network/5xx failures. */

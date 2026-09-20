@@ -23,6 +23,7 @@ import {
   type ExportRow,
   type JsonLink,
 } from "../lib/export-builders";
+import { uploadToGofile, shouldOffloadToGofile, chunkSize } from "../lib/gofile";
 
 interface WorkerState {
   result: GenResult | null;
@@ -172,13 +173,18 @@ async function runGenerate(msg: {
   cdnSelection: string[];
   token: string;
   bunnyZone: string;
+  urlBudget?: number;
 }): Promise<void> {
   resetForNewRun();
   try {
     if (msg.mode === "repo") {
       state.result = await generateLinks(
         msg.repos,
-        { commitsPerSVG: msg.commitsPerSVG, cdnSelection: msg.cdnSelection },
+        {
+          commitsPerSVG: msg.commitsPerSVG,
+          cdnSelection: msg.cdnSelection,
+          urlBudget: msg.urlBudget,
+        },
         msg.token || undefined,
         postGenProgress,
         shouldAbort,
@@ -215,12 +221,32 @@ async function runGenerate(msg: {
   });
 }
 
+/** Above this many URLs, auto-validation is skipped entirely (millions of
+ * HTTP requests would run for hours). Links remain fully usable. */
+const VALIDATE_URL_CAP = 2_000_000;
+
 async function runValidate(msg: { gen: number; concurrency: number }): Promise<void> {
   if (!state.result || state.totalUrls === 0) {
     post({ type: "done", gen: msg.gen, payload: { validCount: 0, brokenCount: 0, filterSafeCount: state.filterSafeCount } });
     return;
   }
   abortFlag = false;
+  // Scale guard: validating 2M+ URLs means millions of HTTP requests — it
+  // would run for hours after generation already finished. Above the cap,
+  // skip validation; links stay fully usable and downloadable.
+  if (state.totalUrls > VALIDATE_URL_CAP) {
+    post({
+      type: "exportProgress",
+      gen: msg.gen,
+      message: `Skipped validation — ${state.totalUrls.toLocaleString()} links is beyond the validation cap (${VALIDATE_URL_CAP.toLocaleString()}). Downloads still include every link.`,
+    });
+    post({
+      type: "done",
+      gen: msg.gen,
+      payload: { validCount: 0, brokenCount: 0, filterSafeCount: state.filterSafeCount, skipped: true },
+    });
+    return;
+  }
   const urls: string[] = [];
   for (const u of scopedUrls("all")) urls.push(u);
   try {
@@ -348,9 +374,41 @@ function runPage(msg: { gen: number; offset: number; limit: number; validateOn: 
   } catch (err) {
     post({ type: "error", gen: msg.gen, message: err instanceof Error ? err.message : String(err) });
   }
-}
+}const COPY_CHAR_LIMIT = 400_000_000; // ~400M chars — clipboard ceiling guard
 
-const COPY_CHAR_LIMIT = 400_000_000; // ~400M chars — clipboard ceiling guard
+/** Post an export as a transferred buffer, or — when the payload is huge —
+ * upload a lazy chunked Blob to Gofile and return the link instead. The
+ * giant payload is NEVER materialized as one string/bytes copy. */
+async function postExport(
+  msg: { gen: number; filename: string },
+  build: { chunks: string[] } | { bytes: Uint8Array; mime: string },
+): Promise<void> {
+  if ("bytes" in build) {
+    const { bytes, mime } = build;
+    if (shouldOffloadToGofile(null, bytes.byteLength)) {
+      post({ type: "exportProgress", gen: msg.gen, payload: { message: `Large export (${Math.round(bytes.byteLength / 1048576)} MB) — uploading to Gofile.io…` } });
+      const up = await uploadToGofile(new Blob([bytes.buffer as ArrayBuffer]), msg.filename);
+      post({ type: "export", gen: msg.gen, filename: `GOFILE:${up.url}` });
+      return;
+    }
+    post({ type: "export", gen: msg.gen, filename: msg.filename, mime, buf: bytes }, [bytes.buffer]);
+    return;
+  }
+  // Chunk-built export: decide before joining — no double copy of huge data.
+  const { chunks } = build;
+  if (shouldOffloadToGofile(chunks, 0)) {
+    const mb = Math.round(chunkSize(chunks) / 1048576);
+    post({ type: "exportProgress", gen: msg.gen, payload: { message: `Large export (~${mb} MB) — uploading to Gofile.io…` } });
+    const blob = new Blob(
+      chunks.map((c) => new Blob([c], { type: "text/plain" })),
+    );
+    const up = await uploadToGofile(blob, msg.filename);
+    post({ type: "export", gen: msg.gen, filename: `GOFILE:${up.url}` });
+    return;
+  }
+  const bytes = new TextEncoder().encode(chunks.join(""));
+  post({ type: "export", gen: msg.gen, filename: msg.filename, mime: "text/plain", buf: bytes }, [bytes.buffer]);
+}
 
 async function runCopyText(msg: { gen: number; scope: string }): Promise<void> {
   try {
@@ -398,20 +456,18 @@ async function runExport(msg: {
       }
       const chunks: string[] = [];
       await buildTextChunks(chosen, (c) => chunks.push(c));
-      const text = chunks.join("");
-      const buf = new TextEncoder().encode(text);
-      post({ type: "export", gen: msg.gen, filename: msg.filename, buf }, [buf.buffer]);
+      await postExport(msg, { chunks });
       return;
     }
 
     if (msg.kind !== "zip") {
-      // Single-file export: build chunked, join in the worker, transfer bytes.
+      // Single-file export: build chunked; small payloads join + transfer,
+      // huge ones upload to Gofile straight from the chunks (never joined).
       const chunks: string[] = [];
       if (msg.kind === "txt") await buildTextChunks(scopedUrls(msg.scope), (c) => chunks.push(c));
       else if (msg.kind === "csv") await buildCsvChunks(scopedRows(msg.scope), (c) => chunks.push(c));
       else await buildJsonChunks(scopedJsonLinks(msg.scope), new Date().toISOString(), (c) => chunks.push(c));
-      const bytes = new TextEncoder().encode(chunks.join(""));
-      post({ type: "export", gen: msg.gen, filename: msg.filename, buf: bytes }, [bytes.buffer]);
+      await postExport(msg, { chunks });
       return;
     }
 
@@ -466,7 +522,7 @@ async function runExport(msg: {
 
     const zip = buildZipChunks(entries);
     const zipBytes = new Uint8Array(await zip.arrayBuffer());
-    post({ type: "export", gen: msg.gen, filename: msg.filename, buf: zipBytes }, [zipBytes.buffer]);
+    await postExport(msg, { bytes: zipBytes, mime: "application/zip" });
   } catch (err) {
     post({ type: "error", gen: msg.gen, message: err instanceof Error ? err.message : String(err) });
   }

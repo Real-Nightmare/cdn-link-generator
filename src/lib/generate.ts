@@ -3,10 +3,13 @@
 
 import { CDNProvider, generateCDNLink, selectCDNs, bunnyReady } from "./cdns";
 import { GitHubRepo, getCommitSHAs, getPackageSVGs, getSVGFiles, getTreeForCommit } from "./github";
+import { DEFAULT_URL_BUDGET } from "./settings";
 
 export interface GenOptions {
   commitsPerSVG: number; // 0 = all fetched commits (repo mode)
   cdnSelection: string[]; // empty = all providers
+  /** Max URL objects to hold (repo mode). Defaults to the settings default. */
+  urlBudget?: number;
 }
 
 export interface GenProgress {
@@ -38,21 +41,17 @@ export interface GenResult {
   sampled?: boolean;
 }
 
-/** Hard memory budget on the number of URL objects the worker holds. 10k
- * files × 100 commits × 24 providers ≈ 24M URLs → OOM = silent death (the
- * "stuck at loading" report). Above this, commits are sampled so links
- * still cover every SVG across the repo's history. */
-export const MAX_URL_BUDGET = 2_000_000;
-
-/**
- * Sample `shas` down so files × commits × providers stays inside the URL
+/** Sample `shas` down so files × commits × providers stays inside the URL
  * budget. Deterministic even sampling (never just the newest N, which would
- * miss history); always keeps the newest commit.
- */
-export function sampleCommits(fileCount: number, shas: string[], providerCount: number): { shas: string[]; sampled: boolean } {
+ * miss history); always keeps the newest commit. */
+export function sampleCommits(
+  fileCount: number,
+  shas: string[],
+  providerCount: number,
+  budget: number,
+): { shas: string[]; sampled: boolean } {
   if (fileCount === 0 || providerCount === 0) return { shas, sampled: false };
-  const perCommit = fileCount * providerCount;
-  const maxCommits = Math.max(1, Math.floor(MAX_URL_BUDGET / perCommit));
+  const maxCommits = Math.max(1, Math.floor(budget / (fileCount * providerCount)));
   if (shas.length <= maxCommits) return { shas, sampled: false };
   const stride = shas.length / maxCommits;
   const picked: string[] = [];
@@ -109,14 +108,15 @@ export async function generateLinks(
       }
       // Memory guard: 10k files × 100 commits × 24 providers would build
       // ~24M URL objects and kill the worker. Sample commits, keep newest.
-      const { shas: usable, sampled } = sampleCommits(files.length, shas, providers.length);
+      const budget = opts.urlBudget ?? DEFAULT_URL_BUDGET;
+      const { shas: usable, sampled } = sampleCommits(files.length, shas, providers.length, budget);
       shas = usable;
       if (sampled) result.sampled = true;
 
-      // Phase 3: build links — STREAMED per commit: fetch ONE commit's .svg
-      // tree, emit its links, drop the tree. The old approach materialized
-      // every commit's tree up front (70 commits × 10k entries = hundreds of
-      // MB before a single link existed).
+      // Phase 3: build links — parallel-fetch commit trees (bounded, memory
+      // stays ~TREES_IN_FLIGHT trees) and emit links as each lands. The old
+      // one-at-a-time loop was the "stuck reading all commits" stall: a
+      // single hung tree request froze the entire links phase with no error.
       onProgress({
         phase: "links",
         current: i + 1,
@@ -126,41 +126,49 @@ export async function generateLinks(
       const bunny = bunnyReady();
       let treeDone = 0;
       let built = 0;
-      links: for (const sha of shas) {
+      const TREES_IN_FLIGHT = 6;
+      links: for (let start = 0; start < shas.length; start += TREES_IN_FLIGHT) {
         if (shouldAbort?.()) return result;
-        let tree: Set<string>;
-        try {
-          tree = await getTreeForCommit(repo, sha, token);
-        } catch {
-          continue; // commit unreachable — no links from it
-        }
-        for (const path of tree) {
-          const urls = providers
-            .map((provider) => ({
-              provider,
-              url: generateCDNLink(
-                repo.owner,
-                repo.name,
-                sha,
-                path,
+        const batch = shas.slice(start, start + TREES_IN_FLIGHT);
+        const trees = await Promise.all(
+          batch.map(async (sha) => {
+            try {
+              return { sha, tree: await getTreeForCommit(repo, sha, token) };
+            } catch {
+              return { sha, tree: null }; // commit unreachable — skip it
+            }
+          }),
+        );
+        for (const { sha, tree } of trees) {
+          if (!tree) continue;
+          for (const path of tree) {
+            const urls = providers
+              .map((provider) => ({
                 provider,
-                undefined,
-                bunny ? bunnyZoneName : undefined,
-              ),
-            }))
-            .filter((u) => u.url !== "");
-          if (urls.length === 0) continue;
-          result.links.push({ repo: key, path, sha, urls });
-          built += urls.length;
-          if (built > MAX_URL_BUDGET * 1.2) break links; // hard safety stop
+                url: generateCDNLink(
+                  repo.owner,
+                  repo.name,
+                  sha,
+                  path,
+                  provider,
+                  undefined,
+                  bunny ? bunnyZoneName : undefined,
+                ),
+              }))
+              .filter((u) => u.url !== "");
+            if (urls.length === 0) continue;
+            result.links.push({ repo: key, path, sha, urls });
+            built += urls.length;
+            if (built > budget * 1.2) break links; // hard safety stop
+          }
+          treeDone++;
+          onProgress({
+            phase: "links",
+            current: treeDone,
+            total: shas.length,
+            label: `${key}: commit ${treeDone}/${shas.length} — ${built.toLocaleString()} links so far`,
+          });
         }
-        treeDone++;
-        onProgress({
-          phase: "links",
-          current: treeDone,
-          total: shas.length,
-          label: `${key}: commit ${treeDone}/${shas.length} — ${built.toLocaleString()} links so far`,
-        });
       }
     } catch (err) {
       result.repos.push({
