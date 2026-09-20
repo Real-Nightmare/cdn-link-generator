@@ -46,6 +46,11 @@ const BROWSE_HIDE_LIMIT = 1_000_000;
 /** Rows fetched per table page from the worker. */
 const PAGE_SIZE = 200;
 
+/** Max filter-checker result cards rendered — huge runs probe hundreds of
+ * sampled targets and rendering them all would freeze the panel. Blocked
+ * targets are always shown first. */
+const FILTER_CARDS_MAX = 120;
+
 function parseRepoLines(text: string): { repos: GitHubRepo[]; invalid: string[] } {
   const repos: GitHubRepo[] = [];
   const invalid: string[] = [];
@@ -103,6 +108,7 @@ export default function Generator() {
   const [filterBusy, setFilterBusy] = useState(false);
   const [filterProgress, setFilterProgress] = useState<{ done: number; total: number } | null>(null);
   const [filterResults, setFilterResults] = useState<DomainFilterResult[] | null>(null);
+  const [filterSampled, setFilterSampled] = useState(false);
   const [unblockedCounts, setUnblockedCounts] = useState<Record<string, number> | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
 
@@ -390,6 +396,7 @@ export default function Generator() {
         onProgress: (done, total) => setFilterProgress({ done, total }),
       });
       setFilterResults(res.results);
+      setFilterSampled(res.sampled === true);
       setUnblockedCounts(res.unblockedCounts);
       setSummary((s) => (s ? { ...s, filterSafeCount: res.filterSafeCount } : s));
     } catch (err) {
@@ -1015,6 +1022,12 @@ export default function Generator() {
                     ⚠ GitHub truncated the tree listing — very large repos may be incomplete.
                   </p>
                 )}
+                {summary.sampled && (
+                  <p className="mt-2 text-xs text-warn">
+                    ⚠ Huge repo: commit history was sampled so the run fits in memory — links still cover every SVG,
+                    spread across the history. Lower "Commits per SVG" for full-depth history.
+                  </p>
+                )}
               </div>
 
               {/* Actions */}
@@ -1083,7 +1096,7 @@ export default function Generator() {
                   {filterProgress ? (
                     <>
                       <div className="mb-2 flex justify-between text-xs text-slate-400">
-                        <span>Filter Checker — probing domains…</span>
+                        <span>Filter Checker — probing serving URLs…</span>
                         <span className="font-mono">
                           {filterProgress.done}/{filterProgress.total}
                         </span>
@@ -1103,7 +1116,8 @@ export default function Generator() {
                       <>
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                            Filter Checker — {filterResults.length} serving URL{filterResults.length === 1 ? "" : "s"} probed
+                            Filter Checker — {filterResults.length.toLocaleString()} serving URL{filterResults.length === 1 ? "" : "s"} probed
+                            {filterSampled && " (large run: paths sampled per host — host verdicts cover every link)"}
                           </p>
                           <span
                             className={`chip font-mono text-[11px] ${
@@ -1113,12 +1127,12 @@ export default function Generator() {
                             }`}
                           >
                             {totalUrls - (summary.filterSafeCount ?? 0) > 0
-                              ? `⚠ ${totalUrls - (summary.filterSafeCount ?? 0)} links blocked at their serving URL`
-                              : "✓ no blocked domains"}
+                              ? `⚠ ${(totalUrls - (summary.filterSafeCount ?? 0)).toLocaleString()} links blocked at their serving URL`
+                              : "✓ no blocked URLs"}
                           </span>
                         </div>
                         <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                          {filterResults.map((r) => (
+                          {filterResults.slice(0, FILTER_CARDS_MAX).map((r) => (
                             <div
                               key={r.domain}
                               className={`rounded-lg border px-3 py-2 font-mono text-xs ${

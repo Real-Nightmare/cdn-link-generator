@@ -71,33 +71,59 @@ async function runSubset(defsToRun: FilterDef[], url: string): Promise<FilterRes
   );
 }
 
+/** Max distinct host+path probes kept per host. A 10k-file × 70-commit repo
+ * has up to 700k unique serving URLs — probing every one would take days and
+ * the result payload would be gigabytes. 200 sampled paths per host keeps
+ * verdicts representative (reservoir-sampled, unbiased) while host-level
+ * engines still cover EVERY URL on the host. */
+const MAX_PATH_PROBES_PER_HOST = 200;
+
 /**
- * Check every unique serving URL (host + path) with bounded concurrency.
+ * Check serving URLs with bounded concurrency.
  *
- * For each distinct host, host-only engines run once on the bare host; their
- * verdicts are merged into every target on that host. Path-aware engines run
- * per distinct host+path. Results are cached per target; progress is
- * throttled like validation.
+ * Accepts a lazy Iterable so a multi-hundred-thousand-URL dataset never needs
+ * to exist as one array. For each distinct host, host-only engines run once on
+ * the bare host; their verdicts are merged into every target on that host.
+ * Path-aware engines run per distinct host+path, reservoir-sampled to
+ * MAX_PATH_PROBES_PER_HOST per host when a run exceeds that.
  */
 export async function checkDomains(
-  urls: string[],
+  urls: Iterable<string>,
   concurrency: number,
   onProgress?: (done: number, total: number) => void,
   shouldAbort?: () => boolean,
-): Promise<DomainFilterResult[]> {
+): Promise<{ results: DomainFilterResult[]; sampled: boolean }> {
   const { pathAware, hostOnly } = defs();
+  let sampledAny = false;
 
-  // ── Plan the work: unique hosts and unique host+path targets ──────────────
+  // ── Plan the work: unique hosts + per-host sampled path targets ───────────
   const hostTargets = new Map<string, string>(); // host → probe key
-  const pathTargets = new Map<string, string>(); // host+path → probe key
+  const reservoirs = new Map<string, { pool: string[]; seen: number }>(); // host → sampled path keys
   for (const url of urls) {
     const key = targetKeyOf(url);
     if (!key) continue;
     const host = key.split("/")[0].toLowerCase();
     if (!host) continue;
     if (!hostTargets.has(host)) hostTargets.set(host, host);
-    const hasPath = key.length > host.length;
-    if (hasPath && !pathTargets.has(key)) pathTargets.set(key, key);
+    if (key.length > host.length) {
+      // Reservoir sampling: unbiased k-per-host sample in one streaming pass.
+      let r = reservoirs.get(host);
+      if (!r) reservoirs.set(host, (r = { pool: [], seen: 0 }));
+      if (r.pool.length < MAX_PATH_PROBES_PER_HOST) {
+        r.pool.push(key);
+      } else {
+        sampledAny = true;
+        r.seen++;
+        const slot = Math.floor(Math.random() * r.seen);
+        if (slot < MAX_PATH_PROBES_PER_HOST) r.pool[slot] = key;
+        continue;
+      }
+      r.seen++;
+    }
+  }
+  const pathTargets = new Map<string, string>(); // host+path → probe key
+  for (const { pool } of reservoirs.values()) {
+    for (const key of pool) if (!pathTargets.has(key)) pathTargets.set(key, key);
   }
 
   // ── Determine what still needs network work (cache hits are free) ─────────
@@ -152,7 +178,7 @@ export async function checkDomains(
       if (hostEntry) out.push(hostEntry);
     }
   }
-  return out;
+  return { results: out, sampled: sampledAny };
 }
 
 /** Combine a host-only verdict set with a path-aware verdict set. */
