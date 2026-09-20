@@ -1,336 +1,72 @@
-# CDN Link Generator Pro (Go Edition)
+# CDN Link Studio
 
-🚀 **Lightning-fast**, **multi-SVG**, **multi-CDN** link generator. Point it at any GitHub repository, and it turns every SVG into ready-to-use CDN links across 13 providers — automatically, in seconds.
+Turn any GitHub repository's SVG files into ready-to-ship, commit-pinned CDN links — entirely in your browser.
 
-## Features
+This is the web successor to the **cdn-link-generator** CLI (still available in the git history). Same proven pipeline — one Trees API call to scan the whole repo, real commit SHAs from history, links across 24 CDN providers, parallel validation — now with zero installation: open the site, paste a repo, copy links.
 
-✨ **High Performance**
-- Written in Go for blazing-fast execution
-- Concurrent SVG scanning, link generation, and validation (goroutines)
-- **Zero runtime dependencies** — a single static binary, stdlib only
+Also supports **npm package mode**: load a package like `bootstrap-icons`, and every SVG in every published version becomes unpkg + jsDelivr links.
 
-🎯 **Multi-Repository Support**
-- Generate links for multiple repos in one run
-- Recursive SVG discovery across entire repo trees (one API call per repo)
-- Per-repo error isolation — one bad repo never stops the rest
+## What it does
 
-📊 **Multi-CDN Support (13 providers)**
-- jsDelivr: Primary, Fastly, Gcore, Testing CF, Quantil, Origin Fastly, CN, Mirror
-- StaticDelivr
-- GitHub Raw alternatives: githubraw.com, Githack (raw + CDN)
-- Filter with `-cdns 1,3,githack` — mix IDs, names, or domains
+1. **Scan** — recursively finds every `.svg` in a repo via a single Git Trees API request
+2. **Walk history** — fetches real commit SHAs (all, or the latest N)
+3. **Generate** — builds a link per SVG per commit per provider, streaming live — **smartly**: each commit's tree is checked, so links are only made when the SVG actually exists at that commit (no 404s for files added later or deleted since)
+4. **Validate** — checks every URL with bounded parallelism (HEAD, GET fallback, hard timeouts) — up to 512 workers, progress-throttled so 100k+ runs stay smooth
+5. **Filter Checker** *(optional)* — probes every **serving URL** (host + full path, e.g. `cdn.jsdelivr.net/gh/user/repo@sha/icon.svg`) against **14 filter engines**: live school-filter vendor lookups (FortiGuard, Blocksi Web + AI, Linewize, Senso Cloud, Sophos SXL4 — all path-aware) plus host-level engines (Lightspeed, Deledao, Barracuda) and five DNS resolvers (Cloudflare Security/Family, CleanBrowsing Security/Family, OpenDNS FamilyShield) via DoH. A link is flagged when any engine blocks it at its exact URL, so a clear base domain no longer hides a blocked serving path (and vice versa). Vendor endpoints without CORS headers are proxied through the bundled Python API (`api/filter.py`), with a public-relay fallback on static previews; **per-filter unblocked exports** let you download exactly the links a specific filter (e.g. Lightspeed) does NOT block — one button per filter
+6. **Ship** — copy all/valid/safe links to clipboard, or download as `.txt` / `.csv` / `.json`, or a **ZIP with one file per CDN** (plus `safe-links.txt` when the Filter Checker ran)
 
-✅ **Automatic Link Validation**
-- Tests every generated link with bounded concurrency
-- HEAD requests (GET fallback), HTTP status checking
-- Order-preserving, progress-tracked
-- Outputs:
-  - `cdn_links_<timestamp>.txt` — all generated links
-  - `cdn_links_<timestamp>_valid.txt` — valid links
-  - `cdn_links_<timestamp>_broken.txt` — broken links (if any)
+## Repo Seeder
 
-🤖 **Automatic Mode**
-- One command, zero prompts: `cdn-link-gen generate owner/repo -y`
-- Flags for commits, CDNs, output file, format (txt/csv), concurrency
-- Works with `GITHUB_TOKEN` env var or stored tokens — or even unauthenticated for public repos
+The **Seeder** page writes to your repos straight from the browser (token needs `Contents: read & write`):
 
-🖥️ **Interactive UI & Persistent Settings**
-- Run `cdn-link-gen` with no arguments for a full interactive menu
-- `setup` wizard saves your preferences permanently to `~/.cdn_settings.json`
-- Every run remembers your choices — future runs reuse them automatically
-- `fix-path` installs the binary on your PATH and makes the fix permanent in your shell profile
+- **SVG Seeder** — paste any SVG, choose 1–**10,000** copies, and it lands in the repo as that many files (`.autogen/`-style batched commits of 500 files each). Identical content is uploaded **once** as a single blob and referenced by every tree entry, so 10,000 files cost the bandwidth of one. Flat or nested layout.
+- **Create repository** — spin up a new repo on your account straight from the page; it lands in the target fields ready to seed.
+- **SVG Cloner** — scan any repo for its `.svg` files, tick the ones you want, and clone them into the target repo in one batched commit. If the token can't push to the source repo (a different account), the cloner **forks it to your account first** and clones from the fork — Git's content-addressed blobs make the copy free.
+- **Artificial commits** — forge 1–**50** real commits that alternate adding and removing a tiny marker file under `.autogen/` (customizable base name, and they can target a new or existing branch), creating genuine history and SHAs that every CDN link can point at. Auto-commit mode keeps forging on a timer (1–60s) until you stop it or the cap is hit. One-click purge removes everything the feature created.
 
-💾 **Secure Token Management**
-- Up to 10 GitHub tokens
-- Hidden input when adding (no shoulder surfing)
-- Stored in `~/.cdn_tokens.json` with `0600` permissions
-- `token verify` checks validity and shows your API rate limit
+### Supported providers (24)
 
-## Installation
+Every URL format is live-tested against a real commit / package before shipping.
 
-### One-Command Install
+| # | Provider | Note |
+|---|----------|------|
+| 1–6 | jsDelivr (cdn / fastly / gcore / testingcf / quantil / originfastly) | Primary + regional mirrors |
+| 7 | cdn.staticdelivr.com | Commit path style |
+| 8–9 | jsd.onmicrosoft.cn, cdn.jsdmirror.com | CN mirrors |
+| 10–11 | githubraw.com, cdn.githubraw.com | SVG-only |
+| 12–13 | raw.githack.com, rawcdn.githack.com | Dev / CDN cache modes |
+| 14 | cdn.statically.io | Multi-purpose open-source CDN |
+| 15 | raw.githubusercontent.com | Official raw host |
+| 17 | gh-proxy.com | Optional proxy wrapper |
+| 18 | ghproxy.net | Optional proxy wrapper |
+| 23–24 | gh.llkk.cc, ghfast.top | Optional proxy wrappers |
+| 21 | `{owner}.github.io` | Optional — requires a Pages site |
+| 22 | Bunny CDN (`{zone}.b-cdn.net`) | Optional — your own pull zone mirroring raw.githubusercontent.com; set the zone in Link Studio |
+| 16 | esm.sh | ESM CDN |
+| 19 | unpkg.com | Optional — npm package mode |
+| 20 | jsDelivr npm | Optional — npm package mode |
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Real-Nightmare/cdn-link-generator/main/install.sh | sh
-```
+## Privacy
 
-The installer finds or installs Go automatically (linux/macOS, amd64/arm64/arm), builds the binary, **copies** it to your PATH (the repo copy keeps working too), and permanently fixes your shell profile PATH when needed.
+There is no backend for your data. Everything — scanning, generation, validation, your token, your settings — runs and lives in your browser (`localStorage`), with the entire heavy pipeline (generation, validation, filter checks, exports) executed in a **background Web Worker** so multi-hundred-thousand-link runs never freeze the page. The only network calls made are to `api.github.com`, the CDN URLs you validate, the public filter-vendor endpoints the Filter Checker probes, and `api/filter.py` (a stdlib-only Python proxy deployed alongside the site for filter endpoints without CORS headers).
 
-Or skip the installer entirely:
+- **No token needed** for public repos (60 API requests/hour)
+- **Optional token** raises the limit to 5,000/hour — stored locally, verifiable in one click, never sent anywhere but GitHub
+
+## Running it
 
 ```bash
-go build -o cdn-link-gen .
-./cdn-link-gen fix-path    # installs to PATH + permanent profile fix
+bun install     # or npm install
+bun run dev     # development server (respects $PORT, binds 0.0.0.0)
+bun run build   # production build → dist/
 ```
 
-### First-Run Setup (recommended)
+### Tech
 
-```bash
-cdn-link-gen setup    # interactive wizard — token, CDNs, format, validation
-```
+React 18 · TypeScript · Vite 5 · Tailwind CSS 3 · React Router (hash routing, static-host friendly) · Web Worker pipeline (generation/validation/exports off the UI thread) · Zero-dep in-browser ZIP export
 
-Everything you pick is saved to `~/.cdn_settings.json` and reused automatically. Running `cdn-link-gen` with no arguments opens the interactive menu instead.
-### Google Cloud Shell
-
-```bash
-git clone https://github.com/Real-Nightmare/cdn-link-generator.git
-cd cdn-link-generator
-./install.sh
-
-# The binary works from the repo folder immediately:
-./cdn-link-gen token add
-./cdn-link-gen generate owner/repo -y
-
-# Or, after sourcing your profile / opening a new shell, from anywhere:
-cdn-link-gen generate owner/repo -y
-```
-
-The installer **copies** the binary to your PATH (the repo copy stays put), and automatically adds the install dir to your `~/.bashrc`/`~/.profile` if it's missing.
-
-```bash
-# Prerequisite: Go 1.18+ (no go.sum needed — zero third-party deps)
-git clone https://github.com/Real-Nightmare/cdn-link-generator.git
-cd cdn-link-generator
-go build -o cdn-link-gen .
-```
-
-Or with make: `make install`
-
-### Docker
-
-```bash
-docker build -t cdn-link-gen .
-docker run --rm -it -e GITHUB_TOKEN=ghp_xxx cdn-link-gen generate owner/repo -y
-```
-
-### Windows
-
-```cmd
-git clone https://github.com/Real-Nightmare/cdn-link-generator.git
-cd cdn-link-generator
-go build -o cdn-link-gen.exe .
-cdn-link-gen.exe generate owner/repo -y
-```
-
-### Raspberry Pi / ARM
-
-```bash
-go build -o cdn-link-gen .   # Go builds natively for armv6/arm64
-```
-
-Cross-compile everything with `make cross-compile` (outputs to `dist/`).
-
-## Quick Start
-
-```bash
-# 1. Add a token (recommended — 5000 req/hour vs 60 unauthenticated)
-cdn-link-gen token add
-# or: export GITHUB_TOKEN=ghp_yourtoken
-
-# 2. Generate links — fully automatic
-cdn-link-gen generate owner/repo -y
-
-# 3. Use your links
-head -20 cdn_links_*.txt
-```
-
-> Works without a token too (public repos, 60 requests/hour) — the tool warns you and continues.
-
-## Usage
-
-### Generate Links
-
-```bash
-# Interactive (asks for confirmation)
-cdn-link-gen generate owner/repo
-
-# Fully automatic — no prompts
-cdn-link-gen generate owner/repo -y
-
-# Multiple repos
-cdn-link-gen generate owner/repo1 owner/repo2 owner/repo3
-
-# Tune everything
-cdn-link-gen generate owner/repo -y -commits 50 -cdns 1,2,3 -format csv -out links.csv
-
-# Fastest possible (skip validation)
-cdn-link-gen generate owner/repo -y -no-validate
-```
-
-**Flags:**
-
-| Flag | Description |
-|------|-------------|
-| `-commits N` | Commits per SVG (default: all found commits) |
-| `-cdns list` | Comma-separated CDN ids/names/domains |
-| `-out file` | Output file path |
-| `-format txt\|csv` | Output format |
-| `-no-validate` | Skip link validation (fastest) |
-| `-validate` | Force validation on (overrides saved settings) |
-| `-y` | Skip confirmation prompt (automatic mode) |
-| `-c N` | Concurrent validation workers (default: 20) |
-| `-make-commits` | Create new commits in a repo you own, then generate links |
-
-### Token Management
-
-```bash
-cdn-link-gen token add        # hidden input, stored with 0600 perms
-cdn-link-gen token list       # masked preview
-cdn-link-gen token verify     # validity + rate limit
-cdn-link-gen token remove 1
-cdn-link-gen token clear
-```
-
-**Get a token:** https://github.com/settings/tokens (scope: `repo` for private repos; no scope needed for public).
-
-### Other Commands
-
-```bash
-cdn-link-gen                # interactive menu (token, generate, settings, PATH fix)
-cdn-link-gen setup          # interactive setup wizard (saves everything)
-cdn-link-gen settings       # show saved settings
-cdn-link-gen fix-path       # install on PATH + permanent profile fix
-cdn-link-gen cdns           # list the 13 CDN providers
-cdn-link-gen demo           # simulated run, no GitHub access
-cdn-link-gen version
-cdn-link-gen --help
-```
-
-## Workflow Example
-
-```bash
-$ cdn-link-gen generate yourname/svg-repo -y
-
-✓ Found SVG files:
-  yourname/svg-repo: 3 SVG(s)
-    • logo.svg
-    • icon.svg
-    • pattern.svg
-
-✓ Total SVGs: 3
-✓ CDN providers: 13
-✓ Rate limit: 4987/5000 requests remaining
-✓ Unique commits found: 42
-✓ Total links to generate: 5,460
-✓ Estimated output size: 426.5 KB
-
-📝 Generating links...
-⏳ Processing: 3/3 SVGs
-
-✓ Link generation complete!
-  Generated: 5,460 links
-✓ Links saved to: cdn_links_2025-01-15_10-30-45.txt
-
-🧪 Testing links for validity...
-🧪 Testing: 5460/5460 links
-
-✓ Valid links: 5,452
-✗ Broken links: 8
-📊 Success rate: 99.9%
-✓ Valid links saved to: cdn_links_2025-01-15_10-30-45_valid.txt
-⚠ Broken links saved to: cdn_links_2025-01-15_10-30-45_broken.txt
-```
-
-## Output Files
-
-### `cdn_links_<timestamp>.txt`
-
-One CDN link per line:
-
-```
-https://cdn.jsdelivr.net/gh/owner/repo@<commit>/logo.svg
-https://fastly.jsdelivr.net/gh/owner/repo@<commit>/logo.svg
-https://gcore.jsdelivr.net/gh/owner/repo@<commit>/logo.svg
-https://cdn.staticdelivr.com/gh/owner/repo/logo.svg
-https://githubraw.com/owner/repo/<commit>/logo.svg
-https://rawcdn.githack.com/owner/repo/<commit>/logo.svg
-...
-```
-
-### `_valid.txt` / `_broken.txt`
-
-Validation splits results so you can grab the working links directly.
-
-## Performance
-
-| Operation | Duration | Notes |
-|-----------|----------|-------|
-| Scan 10 SVGs (recursive) | ~1-2s | One Trees API call per repo |
-| Generate 1000 links | ~0.05s | Memory only |
-| Generate 100k links | ~0.5s | Memory only |
-| Test 1000 links | ~5-10s | 20 concurrent workers |
-| Binary startup | ~5ms | Static binary, no deps |
-
-**Why Go?**
-- Goroutines handle thousands of concurrent validations
-- Single static binary — no interpreter, no runtime deps
-- Stdlib-only: builds instantly, even offline
-
-## Configuration
-
-### Adjusting Validation Concurrency
-
-Use `-c N` (default 20):
-```bash
-cdn-link-gen generate owner/repo -y -c 50   # faster, more load
-cdn-link-gen generate owner/repo -y -c 5    # gentler on slow networks
-```
-
-### Custom CDN List
-
-Edit `cdn.go` and add entries to `cdnProviders`, or select at runtime with `-cdns`.
-
-## Troubleshooting
-
-### "No tokens found"
-Run `cdn-link-gen token add`, or `export GITHUB_TOKEN=...`, or continue unauthenticated for public repos.
-
-### "Repo not found or no access"
-- Check the name format: `owner/repo`
-- Public repo + no token + rate-limited? Wait an hour or add a token
-- Private repo? Your token needs `repo` scope
-
-### "No SVG files found"
-- The repo has no `.svg` files (scan is recursive — check subfolders exist on the default branch)
-- Try another repository
-
-### "Network error"
-The client retries transient failures automatically. Check your internet connection and GitHub API status.
-
-### "GitHub API rate limit exceeded"
-Add a token (`token add`) — authenticated requests get 5000/hour vs 60/hour.
-
-## API Rate Limiting
-
-- GitHub API: 60 requests/hour (unauthenticated), 5000/hour (authenticated)
-- Each repo costs ~2 requests (tree scan + commit listing) regardless of SVG count
-- Check usage any time: `cdn-link-gen token verify`
-
-## Security
-
-- Tokens stored in `~/.cdn_tokens.json` with `0600` permissions
-- Hidden input when typing tokens
-- No tokens sent anywhere except `api.github.com` over HTTPS
-- Links tested with HEAD requests only (no content download)
-- No telemetry, ever
+Zero runtime dependencies beyond React and the router — no UI kit, no state library.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
-
-## Credits
-
-- Based on the original Python version by @arozely
-- Rewritten in Go for performance
-- Multi-SVG, multi-CDN, and automatic mode
-
-## Support
-
-1. Run `cdn-link-gen demo` to see examples
-2. Check [FAQ.md](FAQ.md)
-3. Verify your token: `cdn-link-gen token verify`
-4. Open a GitHub issue
-
----
-
-**Lightning Fast** ⚡ | **Zero Dependencies** 📦 | **Production Ready** ✨
+MIT — see [LICENSE](LICENSE).

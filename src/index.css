@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-ink-950 text-slate-200 antialiased;
+  background-image:
+    radial-gradient(ellipse 60% 40% at 50% -10%, rgba(52, 211, 153, 0.09), transparent),
+    radial-gradient(ellipse 50% 35% at 90% 110%, rgba(52, 211, 153, 0.05), transparent);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgba(52, 211, 153, 0.28);
+  color: #ecfdf5;
+}
+
+/* Scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2b3446 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2b3446;
+  border-radius: 6px;
+  border: 2px solid #0b0e14;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3d485e;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-ink-600/60 bg-ink-850/80 shadow-card;
+  }
+  .input-base {
+    @apply w-full rounded-lg border border-ink-500/70 bg-ink-900 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-accent/70 focus:ring-2 focus:ring-accent/20;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-accent-strong px-5 py-2.5 text-sm font-semibold text-ink-950 shadow-glow transition hover:bg-accent focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-ink-500 bg-ink-800/70 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-accent/50 hover:text-accent-soft disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-ink-500/70 bg-ink-800/80 px-3 py-1 text-xs font-medium text-slate-300;
+  }
+}

@@ -1,23 +1,18 @@
-# Binaries
-cdn-link-gen
-cdn-link-gen.exe
+# Node / Vite web app
+node_modules/
 dist/
+*.local
+tsconfig.tsbuildinfo
 
-# Output files
+# Build artifacts from the legacy CLI
+cdn-link-gen
 cdn_links_*.txt
-*.csv.tmp
+*.tmp
 
-# Test binary
-*.test
-*.out
+# Env
+.env
+.env.local
 
-# Token file (never commit)
-.cdn_tokens.json
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
+# Python
+__pycache__/
+*.pyc
