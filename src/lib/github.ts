@@ -221,6 +221,32 @@ export async function getCommitTrees(
   return out;
 }
 
+/** List commits WITH their tree SHAs (newest first). Tree SHAs let the
+ * generator dedupe: seeded repos repeat one tree across dozens of commits,
+ * so the tree fetch count drops from N commits to N unique trees. */
+export interface CommitWithTree {
+  sha: string;
+  treeSha: string;
+}
+
+export async function getCommitSHAsWithTrees(
+  repo: GitHubRepo,
+  count: number,
+  token?: string,
+): Promise<CommitWithTree[]> {
+  const perPage = Math.min(Math.max(count, 1), 100);
+  const resp = await ghFetchRetry(`/repos/${repo.owner}/${repo.name}/commits?per_page=${perPage}`, {
+    token,
+  });
+  if (!resp.ok) {
+    throw new GitHubError(`Failed to list commits (HTTP ${resp.status})`, resp.status);
+  }
+  const commits = (await resp.json()) as { sha: string; commit?: { tree?: { sha?: string } } }[];
+  return commits
+    .filter((c) => c.commit?.tree?.sha)
+    .map((c) => ({ sha: c.sha, treeSha: c.commit!.tree!.sha! }));
+}
+
 /** List real commit SHAs from the repo's history (newest first). */
 export async function getCommitSHAs(
   repo: GitHubRepo,

@@ -39,12 +39,19 @@ export class LightspeedClient {
   private pending = new Map<string, Waiter[]>();
   private closed = false;
   private timeoutMs: number;
+  /** Circuit breaker: consecutive connect failures → fail fast instead of
+   * burning 12s per target on blocked networks. Self-heals after 60s. */
+  private connectFails = 0;
+  private unavailableUntil = 0;
 
   constructor({ timeoutMs = 12000 }: { timeoutMs?: number } = {}) {
     this.timeoutMs = timeoutMs;
   }
 
   private connect(): Promise<void> {
+    if (this.unavailableUntil > Date.now()) {
+      return Promise.reject(new Error("lightspeed unavailable (connection blocked)"));
+    }
     if (this.ready) return this.ready;
     this.ready = new Promise((resolve, reject) => {
       if (this.closed) return reject(new Error("lightspeed client closed"));
@@ -63,6 +70,13 @@ export class LightspeedClient {
         this.pending.clear();
         if (!settled) {
           settled = true;
+          // Two consecutive failed connects → stop paying the connect
+          // timeout on every target for a minute, then retry silently.
+          this.connectFails++;
+          if (this.connectFails >= 2) {
+            this.unavailableUntil = Date.now() + 60_000;
+            this.connectFails = 0;
+          }
           reject(e);
         }
       };
@@ -79,6 +93,7 @@ export class LightspeedClient {
         if (settled) return;
         settled = true;
         clearTimeout(connectTimer);
+        this.connectFails = 0; // a successful open resets the breaker
         resolve();
       };
       ws.onmessage = (ev) => {
@@ -99,9 +114,16 @@ export class LightspeedClient {
       },
       ws.onerror = () => {
         clearTimeout(connectTimer);
-        this.ready = null;
-        // Never surface as an unhandled 'error' event — reject connect only if
-        // it hasn't opened yet; otherwise drop the socket so lookups requeue.
+        // Settle the connect promise — leaving it pending made every filter
+        // check hang forever whenever the socket failed to open (the exact
+        // "stuck loading" bug). The close event (if any) is a no-op after
+        // drop() has already cleared state.
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        drop("lightspeed connect error");
       };
       ws.onclose = () => {
         drop("lightspeed connection closed");
