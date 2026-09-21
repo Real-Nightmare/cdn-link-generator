@@ -1,14 +1,20 @@
 // Link generation pipeline — repo mode (scan → history → links) and
-// npm package mode (versions → package files → links). All client-side.
+// npm package mode (versions → package files → links).
+//
+// Generation no longer materializes URL strings: results are emitted as a
+// compact implicit LinkSet (prefix templates + path groups, see linkset.ts).
+// That makes generation O(tree fetches + integer bookkeeping) and lets a
+// low-end device hold 45M links in a few MB.
 
-import { CDNProvider, generateCDNLink, selectCDNs, bunnyReady } from "./cdns";
-import { GitHubRepo, getCommitSHAs, getPackageSVGs, getSVGFiles, getTreeForCommit } from "./github";
+import { selectCDNs, bunnyReady } from "./cdns";
+import { GitHubRepo, getCommitSHAsWithTrees, getPackageSVGs, getSVGFiles, getTreeForCommit } from "./github";
 import { DEFAULT_URL_BUDGET } from "./settings";
+import { LinkSet, LinkSlot, LinkSource, SlotVariant } from "./linkset";
 
 export interface GenOptions {
   commitsPerSVG: number; // 0 = all fetched commits (repo mode)
   cdnSelection: string[]; // empty = all providers
-  /** Max URL objects to hold (repo mode). Defaults to the settings default. */
+  /** Max flat URLs before commit history is sampled. Defaults to the settings default. */
   urlBudget?: number;
 }
 
@@ -25,19 +31,13 @@ export interface RepoResult {
   svgCount: number;
 }
 
-export interface GeneratedLink {
-  repo: string; // "owner/repo" or "pkg@version" in npm mode
-  path: string;
-  sha: string;
-  urls: { provider: CDNProvider; url: string }[];
-}
-
 export interface GenResult {
   repos: RepoResult[];
-  links: GeneratedLink[];
+  /** Compact implicit dataset — URLs are derived lazily. */
+  set: LinkSet;
   truncated: boolean;
   /** True when commit history was sampled (files × commits × providers would
-   * have blown the memory budget). The summary message says so. */
+   * have exceeded the URL budget). The summary message says so. */
   sampled?: boolean;
 }
 
@@ -61,6 +61,40 @@ export function sampleCommits(
   return { shas: picked, sampled: true };
 }
 
+/** Repo-mode slots: npm-only providers can't build repo links. */
+function repoSlots(selection: string[], bunnyZone: string | undefined): LinkSlot[] {
+  return selectCDNs(selection)
+    .filter((p) => p.format !== "npm" && p.format !== "npmunpkg")
+    .map((provider) => ({
+      provider,
+      variant: (provider.format === "pages" ? "pages" : "ref") as SlotVariant,
+    }))
+    .filter((s) => s.provider.format !== "bunny" || !!bunnyZone);
+}
+
+/** npm-mode slots: only npm-capable providers, one slot each. */
+function npmSlots(selection: string[]): LinkSlot[] {
+  return selectCDNs(selection)
+    .filter((p) => p.format === "npm" || p.format === "npmunpkg")
+    .map((provider) => ({ provider, variant: "ref" as SlotVariant }));
+}
+
+/** Recompute the LinkSet totals. The flat row count matches iterUrlEntries
+ * exactly: every slot contributes paths × refs rows — pages-variant URLs are
+ * ref-independent strings but still repeat per ref (legacy parity). */
+function finalize(set: LinkSet): void {
+  let total = 0;
+  const paths = new Set<string>();
+  for (const src of set.sources) {
+    for (const g of src.groups) {
+      for (const p of g.paths) paths.add(p);
+      total += g.paths.length * g.refIdx.length * set.slots.length;
+    }
+  }
+  set.totalUrls = total;
+  set.uniquePaths = paths.size;
+}
+
 /** Generate links for every SVG across every repo, streaming progress. */
 export async function generateLinks(
   repos: GitHubRepo[],
@@ -70,30 +104,28 @@ export async function generateLinks(
   shouldAbort?: () => boolean,
   bunnyZoneName?: string,
 ): Promise<GenResult> {
-  // npm-only providers can't build repo links — exclude them here.
-  const providers = selectCDNs(opts.cdnSelection).filter(
-    (p) => p.format !== "npm" && p.format !== "npmunpkg",
-  );
-  const result: GenResult = { repos: [], links: [], truncated: false };
+  const bunny = bunnyReady() ? bunnyZoneName : undefined;
+  const slots = repoSlots(opts.cdnSelection, bunny);
+  const result: GenResult = {
+    repos: [],
+    truncated: false,
+    set: { mode: "repo", slots, sources: [], bunnyZone: bunny, totalUrls: 0, uniquePaths: 0 },
+  };
+  const budget = opts.urlBudget ?? DEFAULT_URL_BUDGET;
 
-  // Phase 1: scan each repo for SVGs (per-repo error isolation).
   for (let i = 0; i < repos.length; i++) {
     if (shouldAbort?.()) return result;
     const repo = repos[i];
     const key = `${repo.owner}/${repo.name}`;
-    onProgress({
-      phase: "repos",
-      current: i + 1,
-      total: repos.length,
-      label: `Scanning ${key}…`,
-    });
+    onProgress({ phase: "repos", current: i + 1, total: repos.length, label: `Scanning ${key}…` });
     try {
       const { files, truncated } = await getSVGFiles(repo, token);
       if (truncated) result.truncated = true;
       result.repos.push({ repo: key, svgCount: files.length });
-      if (files.length === 0) continue;
+      if (files.length === 0 || slots.length === 0) continue;
 
-      // Phase 2: fetch commit SHAs.
+      // Phase 2: fetch commits WITH their tree SHAs — commits that share a
+      // tree (the common case for seeded repos) need only one tree fetch.
       onProgress({
         phase: "commits",
         current: i + 1,
@@ -101,74 +133,78 @@ export async function generateLinks(
         label: `Fetching commits for ${key}…`,
       });
       const count = opts.commitsPerSVG > 0 ? opts.commitsPerSVG : files.length;
-      let shas = await getCommitSHAs(repo, count, token);
-      if (shas.length === 0) {
+      const commits = await getCommitSHAsWithTrees(repo, count, token);
+      if (commits.length === 0) {
         result.repos.push({ repo: key, error: "no commits found", svgCount: files.length });
         continue;
       }
-      // Memory guard: 10k files × 100 commits × 24 providers would build
-      // ~24M URL objects and kill the worker. Sample commits, keep newest.
-      const budget = opts.urlBudget ?? DEFAULT_URL_BUDGET;
-      const { shas: usable, sampled } = sampleCommits(files.length, shas, providers.length, budget);
-      shas = usable;
+      const { shas, sampled } = sampleCommits(
+        files.length,
+        commits.map((c) => c.sha),
+        slots.length,
+        budget,
+      );
       if (sampled) result.sampled = true;
+      const keep = new Set(shas);
+      const kept = commits.filter((c) => keep.has(c.sha));
 
-      // Phase 3: build links — parallel-fetch commit trees (bounded, memory
-      // stays ~TREES_IN_FLIGHT trees) and emit links as each lands. The old
-      // one-at-a-time loop was the "stuck reading all commits" stall: a
-      // single hung tree request froze the entire links phase with no error.
+      // Phase 3: fetch each unique tree once (bounded parallel), grouping
+      // commits by identical tree. Memory = paths × unique trees, tiny.
       onProgress({
         phase: "links",
         current: i + 1,
         total: repos.length,
         label: `Generating links for ${key}…`,
       });
-      const bunny = bunnyReady();
-      let treeDone = 0;
-      let built = 0;
+      const byTree = new Map<string, string[]>(); // treeSha → commit shas (order preserved)
+      for (const c of kept) {
+        const list = byTree.get(c.treeSha);
+        if (list) list.push(c.sha);
+        else byTree.set(c.treeSha, [c.sha]);
+      }
+      const treeKeys = [...byTree.keys()];
+      const treePaths = new Map<string, string[]>();
       const TREES_IN_FLIGHT = 6;
-      links: for (let start = 0; start < shas.length; start += TREES_IN_FLIGHT) {
+      let treeDone = 0;
+      for (let start = 0; start < treeKeys.length; start += TREES_IN_FLIGHT) {
         if (shouldAbort?.()) return result;
-        const batch = shas.slice(start, start + TREES_IN_FLIGHT);
-        const trees = await Promise.all(
-          batch.map(async (sha) => {
+        const batch = treeKeys.slice(start, start + TREES_IN_FLIGHT);
+        await Promise.all(
+          batch.map(async (treeSha) => {
             try {
-              return { sha, tree: await getTreeForCommit(repo, sha, token) };
+              const paths = await getTreeForCommit(repo, treeSha, token);
+              const sorted = [...paths].sort();
+              if (sorted.length > 0) treePaths.set(treeSha, sorted);
             } catch {
-              return { sha, tree: null }; // commit unreachable — skip it
+              // unreachable tree — its commits are skipped
             }
           }),
         );
-        for (const { sha, tree } of trees) {
-          if (!tree) continue;
-          for (const path of tree) {
-            const urls = providers
-              .map((provider) => ({
-                provider,
-                url: generateCDNLink(
-                  repo.owner,
-                  repo.name,
-                  sha,
-                  path,
-                  provider,
-                  undefined,
-                  bunny ? bunnyZoneName : undefined,
-                ),
-              }))
-              .filter((u) => u.url !== "");
-            if (urls.length === 0) continue;
-            result.links.push({ repo: key, path, sha, urls });
-            built += urls.length;
-            if (built > budget * 1.2) break links; // hard safety stop
-          }
-          treeDone++;
-          onProgress({
-            phase: "links",
-            current: treeDone,
-            total: shas.length,
-            label: `${key}: commit ${treeDone}/${shas.length} — ${built.toLocaleString()} links so far`,
-          });
-        }
+        treeDone += batch.length;
+        onProgress({
+          phase: "links",
+          current: Math.min(treeDone, treeKeys.length),
+          total: treeKeys.length,
+          label: `${key}: tree ${Math.min(treeDone, treeKeys.length)}/${treeKeys.length} — building links…`,
+        });
+      }
+
+      // Assemble the source: groups in first-seen tree order, refs newest-first.
+      const src: LinkSource = { key, owner: repo.owner, name: repo.name, refs: [], groups: [] };
+      const refIdx = new Map<string, number>();
+      for (const c of kept) {
+        const idx = src.refs.length;
+        src.refs.push(c.sha);
+        refIdx.set(c.sha, idx);
+      }
+      for (const [treeSha, commitShas] of byTree) {
+        const paths = treePaths.get(treeSha);
+        if (!paths) continue;
+        src.groups.push({ paths, refIdx: commitShas.map((s) => refIdx.get(s)!).filter((v) => v !== undefined) });
+      }
+      if (src.groups.length > 0) {
+        result.set.sources.push(src);
+        finalize(result.set);
       }
     } catch (err) {
       result.repos.push({
@@ -179,15 +215,18 @@ export async function generateLinks(
     }
   }
 
-  if (result.links.length === 0 && result.repos.every((r) => !r.error)) {
+  finalize(result.set);
+  if (result.set.totalUrls === 0 && result.repos.every((r) => !r.error)) {
     throw new Error("No SVG files found in any of the repositories");
   }
   onProgress({ phase: "done", current: 1, total: 1, label: "Complete" });
   return result;
 }
+
 /**
  * npm package mode: every SVG inside the package's files, replicated across
- * the selected versions and every npm-capable provider.
+ * the selected versions and every npm-capable provider. One source per
+ * version keeps each version's file list independent.
  */
 export async function generatePackageLinks(
   pkg: string,
@@ -196,11 +235,12 @@ export async function generatePackageLinks(
   onProgress: (p: GenProgress) => void,
   shouldAbort?: () => boolean,
 ): Promise<GenResult> {
-  const providers = selectCDNs(opts.cdnSelection).filter(
-    (p) => p.format === "npm" || p.format === "npmunpkg",
-  );
-  const result: GenResult = { repos: [], links: [], truncated: false };
-
+  const slots = npmSlots(opts.cdnSelection);
+  const result: GenResult = {
+    repos: [],
+    truncated: false,
+    set: { mode: "npm", slots, sources: [], totalUrls: 0, uniquePaths: 0 },
+  };
   const versionsToUse =
     opts.commitsPerSVG > 0 ? versions.slice(0, opts.commitsPerSVG) : versions;
 
@@ -216,7 +256,7 @@ export async function generatePackageLinks(
     try {
       const files = await getPackageSVGs(pkg, version);
       result.repos.push({ repo: `${pkg}@${version}`, svgCount: files.length });
-      if (files.length === 0) continue;
+      if (files.length === 0 || slots.length === 0) continue;
 
       onProgress({
         phase: "links",
@@ -224,29 +264,14 @@ export async function generatePackageLinks(
         total: versionsToUse.length,
         label: `Generating links for ${pkg}@${version}…`,
       });
-      let done = 0;
-      for (const path of files) {
-        const urls = providers
-          .map((provider) => ({
-            provider,
-            url: generateCDNLink(pkg, "", version, path, provider, pkg),
-          }))
-          .filter((u) => u.url !== "");
-        if (urls.length === 0) continue;
-        result.links.push({
-          repo: `${pkg}@${version}`,
-          path,
-          sha: version,
-          urls,
-        });
-        done++;
-        onProgress({
-          phase: "links",
-          current: done,
-          total: files.length,
-          label: `${pkg}@${version}: ${done}/${files.length} SVGs`,
-        });
-      }
+      result.set.sources.push({
+        key: `${pkg}@${version}`,
+        owner: pkg,
+        name: "",
+        refs: [version],
+        groups: [{ paths: files.sort(), refIdx: [0] }],
+      });
+      finalize(result.set);
     } catch (err) {
       result.repos.push({
         repo: `${pkg}@${version}`,
@@ -256,65 +281,16 @@ export async function generatePackageLinks(
     }
   }
 
-  if (result.links.length === 0 && result.repos.every((r) => !r.error)) {
+  finalize(result.set);
+  if (result.set.totalUrls === 0 && result.repos.every((r) => !r.error)) {
     throw new Error(`No SVG files found in ${pkg} (any version)`);
   }
   onProgress({ phase: "done", current: 1, total: 1, label: "Complete" });
   return result;
 }
 
-/** Flatten links to plain URL lines (for copy/download). */
-export function linksToText(links: GeneratedLink[]): string {
-  return links.flatMap((l) => l.urls.map((u) => u.url)).join("\n");
-}
-
-/** Flatten links to CSV: repo,path,commit,provider,url */
-export function linksToCSV(links: GeneratedLink[]): string {
-  const esc = (s: string) => `"${s.replaceAll('"', '""')}"`;
-  const rows = ["repo,path,commit,provider,url"];
-  for (const l of links) {
-    for (const u of l.urls) {
-      rows.push([esc(l.repo), esc(l.path), esc(l.sha), esc(u.provider.name), esc(u.url)].join(","));
-    }
-  }
-  return rows.join("\n");
-}
-
-/** Structured JSON export (lossless, re-importable). */
-export function linksToJSON(links: GeneratedLink[]): string {
-  return JSON.stringify(
-    {
-      tool: "cdn-link-studio",
-      generatedAt: new Date().toISOString(),
-      links: links.map((l) => ({
-        source: l.repo,
-        path: l.path,
-        ref: l.sha,
-        urls: l.urls.map((u) => ({ provider: u.provider.name, domain: u.provider.domain, url: u.url })),
-      })),
-    },
-    null,
-    2,
-  );
-}
-
-/** Group links by provider for per-CDN downloads (JSON export). */
-export function groupByProvider(links: GeneratedLink[]): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const l of links) {
-    for (const u of l.urls) {
-      if (!u.url) continue; // e.g. Bunny with no zone configured
-      const key = u.provider.name;
-      const list = map.get(key) ?? [];
-      list.push(u.url);
-      map.set(key, list);
-    }
-  }
-  return map;
-}
-
 // ---------------------------------------------------------------------------
-// ZIP writer — STORE method (no compression), no external deps.
+// ZIP writer — STORE method (no compression), streaming and memory-flat.
 // ---------------------------------------------------------------------------
 
 const crcTable = (() => {
@@ -327,145 +303,139 @@ const crcTable = (() => {
   return t;
 })();
 
-/** Minimal zip writer — STORE method (no compression), no external deps. */
-function crc32(buf: Uint8Array): number {
-  let table = crcTable;
-  let crc = 0 ^ -1;
-  for (let i = 0; i < buf.length; i++) {
-    crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff];
+function crcBytes(crc: number, bytes: Uint8Array): number {
+  for (let i = 0; i < bytes.length; i++) {
+    crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[i]) & 0xff];
   }
-  return (crc ^ -1) >>> 0;
+  return crc;
 }
 
-function concatBytes(parts: Uint8Array[]): Uint8Array {
-  let total = 0;
-  for (const p of parts) total += p.length;
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    out.set(p, off);
-    off += p.length;
-  }
-  return out;
-}
-
-interface ZipEntry {
-  data: Uint8Array;
-  crc: number;
-  size: number;
-  name: Uint8Array;
-}
-
-/** Shared writer: local headers + central directory + EOCD. */
-function writeZip(entries: ZipEntry[]): Blob {
-  // Exact: local headers (30 + name + data) + central dir (46 + name) + EOCD (22)
-  const total =
-    entries.reduce((a, c) => a + 30 + c.name.length + c.size, 0) +
-    entries.reduce((a, c) => a + 46 + c.name.length, 0) +
-    22;
-  const buf = new Uint8Array(total);
-  const view = new DataView(buf.buffer);
-  let off = 0;
-
-  const writeU16 = (v: number) => {
-    view.setUint16(off, v, true);
-    off += 2;
-  };
-  const writeU32 = (v: number) => {
-    view.setUint32(off, v, true);
-    off += 4;
-  };
-
-  // Local file headers + data
-  const localOffsets: number[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    localOffsets.push(off);
-    writeU32(0x04034b50);
-    writeU16(20); // version needed
-    writeU16(0); // flags
-    writeU16(0); // method: store
-    writeU16(0); // mod time
-    writeU16(0x21); // mod date (1980-01-01)
-    writeU32(entries[i].crc);
-    writeU32(entries[i].size); // compressed
-    writeU32(entries[i].size); // uncompressed
-    writeU16(entries[i].name.length);
-    writeU16(0); // extra len
-    buf.set(entries[i].name, off);
-    off += entries[i].name.length;
-    buf.set(entries[i].data, off);
-    off += entries[i].data.length;
-  }
-
-  // Central directory
-  const centralStart = off;
-  for (let i = 0; i < entries.length; i++) {
-    writeU32(0x02014b50);
-    writeU16(20); // version made by
-    writeU16(20); // version needed
-    writeU16(0); // flags
-    writeU16(0); // method
-    writeU16(0); // time
-    writeU16(0x21); // date
-    writeU32(entries[i].crc);
-    writeU32(entries[i].size);
-    writeU32(entries[i].size);
-    writeU16(entries[i].name.length);
-    writeU16(0); // extra
-    writeU16(0); // comment
-    writeU16(0); // disk
-    writeU16(0); // internal attrs
-    writeU32(0); // external attrs
-    writeU32(localOffsets[i]);
-    buf.set(entries[i].name, off);
-    off += entries[i].name.length;
-  }
-
-  // End of central directory
-  const cdSize = off - centralStart; // capture BEFORE writing (off advances as we write)
-  writeU32(0x06054b50);
-  writeU16(0);
-  writeU16(0);
-  writeU16(entries.length);
-  writeU16(entries.length);
-  writeU32(cdSize);
-  writeU32(centralStart);
-  writeU16(0);
-
-  return new Blob([buf], { type: "application/zip" });
+export interface ZipLazyEntry {
+  name: string;
+  /** Supplies the entry's parts ON DEMAND. Only one entry's chunks exist in
+   * memory at a time — the builder CRCs + spools an entry to a Blob before
+   * the next entry is built, so a 5-entry ZIP of 45M links never holds more
+   * than one dataset copy. */
+  parts: () => Promise<(string | Uint8Array)[]>;
 }
 
 /**
- * Build a zip from pre-chunked text entries — the worker's export path for
- * million-link datasets. CRC is computed incrementally over the chunks so no
- * entry ever needs to exist as one giant string.
+ * Streaming STORE zip. Each entry's parts are materialized once (strings
+ * encoded transiently for CRC/size, the same bytes handed to the payload),
+ * spooled into a per-entry Blob, and released before the next entry loads.
+ * The returned Blob references the spooled payloads — in browsers they are
+ * disk-backed, so peak heap stays at ONE entry's chunks.
  */
-export function buildZipChunks(entries: { name: string; chunks: string[] }[]): Blob {
+export async function buildZipLazy(entries: ZipLazyEntry[]): Promise<Blob> {
   const enc = new TextEncoder();
-  const prepared: ZipEntry[] = entries.map((entry) => {
-    const parts: Uint8Array[] = [];
+  // DOM lib types Blob bytes as ArrayBufferView<ArrayBuffer>; TextEncoder's
+  // Uint8Array is ArrayBufferLike at the type level but always a plain
+  // ArrayBuffer at runtime — one boundary cast keeps the flow honest.
+  const asPart = (x: unknown): BlobPart => x as BlobPart;
+
+  interface Prep {
+    nameBytes: Uint8Array;
+    crc: number;
+    size: number;
+    payload: Blob;
+  }
+  const prepared: Prep[] = [];
+  for (const entry of entries) {
+    const parts = await entry.parts();
     let crc = 0 ^ -1;
     let size = 0;
-    for (const chunk of entry.chunks) {
-      const bytes = enc.encode(chunk);
-      parts.push(bytes);
-      for (let i = 0; i < bytes.length; i++) {
-        crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[i]) & 0xff];
+    const payloadParts: BlobPart[] = [];
+    for (const part of parts) {
+      if (typeof part === "string") {
+        const bytes = enc.encode(part);
+        crc = crcBytes(crc, bytes);
+        size += bytes.length;
+        payloadParts.push(asPart(bytes));
+      } else {
+        crc = crcBytes(crc, part);
+        size += part.length;
+        payloadParts.push(asPart(part));
       }
-      size += bytes.length;
     }
-    return { data: concatBytes(parts), crc: (crc ^ -1) >>> 0, size, name: enc.encode(entry.name) };
-  });
-  return writeZip(prepared);
-}
-
-/** Build a zip file from {filename → text} entries entirely in the browser. */
-export function buildZip(entries: Record<string, string>): Blob {
-  const enc = new TextEncoder();
-  const prepared: ZipEntry[] = [];
-  for (const [name, text] of Object.entries(entries)) {
-    const data = enc.encode(text);
-    prepared.push({ data, crc: crc32(data), size: data.length, name: enc.encode(name) });
+    parts.length = 0; // release the chunk list; the spooled Blob owns the bytes
+    prepared.push({
+      nameBytes: enc.encode(entry.name),
+      crc: (crc ^ -1) >>> 0,
+      size,
+      payload: new Blob(payloadParts),
+    });
   }
-  return writeZip(prepared);
+
+  // Exact layout sizes — no buffer is ever allocated for the payload.
+  const localHeaderSize = (nameLen: number) => 30 + nameLen;
+  const centralSize = (nameLen: number) => 46 + nameLen;
+  let centralStart = 0;
+  for (const p of prepared) centralStart += localHeaderSize(p.nameBytes.length) + p.size;
+  let cdSize = 0;
+  for (const p of prepared) cdSize += centralSize(p.nameBytes.length);
+
+  const header = (p: Prep, offset: number, central: boolean): Uint8Array<ArrayBuffer> => {
+    const buf = new ArrayBuffer(central ? 46 : 30);
+    const view = new DataView(buf);
+    const u16 = (o: number, v: number) => view.setUint16(o, v, true);
+    const u32 = (o: number, v: number) => view.setUint32(o, v, true);
+    if (!central) {
+      u32(0, 0x04034b50);
+      u16(4, 20);
+      u16(6, 0);
+      u16(8, 0); // store
+      u16(10, 0);
+      u16(12, 0x21);
+      u32(14, p.crc);
+      u32(18, p.size);
+      u32(22, p.size);
+      u16(26, p.nameBytes.length);
+      u16(28, 0);
+    } else {
+      u32(0, 0x02014b50);
+      u16(4, 20);
+      u16(6, 20);
+      u16(8, 0);
+      u16(10, 0);
+      u16(12, 0);
+      u16(14, 0x21);
+      u32(16, p.crc);
+      u32(20, p.size);
+      u32(24, p.size);
+      u16(28, p.nameBytes.length);
+      u16(30, 0);
+      u16(32, 0);
+      u16(34, 0);
+      u16(36, 0);
+      u32(38, 0);
+      u32(42, offset);
+    }
+    return new Uint8Array(buf);
+  };
+
+  const blobParts: BlobPart[] = [];
+  const offsets: number[] = [];
+  let off = 0;
+  for (const p of prepared) {
+    offsets.push(off);
+    blobParts.push(header(p, 0, false), asPart(p.nameBytes), p.payload);
+    off += localHeaderSize(p.nameBytes.length) + p.size;
+  }
+  const centralStartActual = off;
+  for (let i = 0; i < prepared.length; i++) {
+    blobParts.push(header(prepared[i], offsets[i], true), asPart(prepared[i].nameBytes));
+    off += centralSize(prepared[i].nameBytes.length);
+  }
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(4, 0, true);
+  eocd.setUint16(6, 0, true);
+  eocd.setUint16(8, prepared.length, true);
+  eocd.setUint16(10, prepared.length, true);
+  eocd.setUint32(12, off - centralStartActual, true);
+  eocd.setUint32(16, centralStartActual, true);
+  eocd.setUint16(20, 0, true);
+  blobParts.push(new Uint8Array(eocd.buffer));
+
+  return new Blob(blobParts, { type: "application/zip" });
 }
