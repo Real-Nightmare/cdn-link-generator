@@ -12,9 +12,10 @@ const API_BASE = "https://api.gofile.io";
 /** Fallback host used when the server list itself is unreachable. */
 const FALLBACK_SERVER = "store1";
 
-/** Exports at/above this size upload to Gofile.io instead of crashing the tab
- * with one giant in-memory copy. */
-let GOFILE_OFFLOAD_BYTES = 100 * 1024 * 1024;
+/** Exports at/above this size upload to Gofile.io instead of a slow local
+ * download (big downloads stall the tab and giant ones crash it). 20MB per
+ * user request — anything bigger becomes a shareable Gofile link. */
+let GOFILE_OFFLOAD_BYTES = 20 * 1024 * 1024;
 
 /** Test-only hook — lets functional tests exercise the offload path without
  * building a 100 MB+ dataset. Production code never calls this. */

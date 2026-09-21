@@ -15,7 +15,7 @@ export async function linewize(domain: string): Promise<[string, boolean]> {
   const res = await fetchURL(
     "https://mvgateway.syd-1.linewize.net/get/verdict?deviceid=PHYS-SMIC-US-0000-3190&cev=3.3.0&identity=null&requested_website=" +
       encodeURIComponent(domain),
-    { timeoutMs: 15000 },
+    { timeoutMs: 8000 },
   );
   const json = (await res.json()) as {
     signatures?: { category?: string; subCategory?: string };

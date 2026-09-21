@@ -32,7 +32,7 @@ export async function deledao(url: string): Promise<[string, boolean]> {
       auth: AUTH_TOKEN,
       hostlist: [url],
     }),
-    timeoutMs: 12000,
+    timeoutMs: 8000,
   });
 
   const controller = new AbortController();
@@ -74,7 +74,7 @@ export async function deledao(url: string): Promise<[string, boolean]> {
       url: normalizedUrl,
       textArray: [{ text, lang: "en" }],
     }),
-    timeoutMs: 12000,
+    timeoutMs: 8000,
   });
 
   if (!res2.ok) throw new Error(`GetTextCategory failed: ${res2.status}`);

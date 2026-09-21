@@ -21,7 +21,7 @@ export async function fortiguard(url: string): Promise<{ category: string; block
       "&catver=10" +
       "&qurl=" +
       encodeURIComponent(url),
-    { timeoutMs: 15000 },
+    { timeoutMs: 8000 },
   );
 
   const rJson = (await res.json()) as { data?: unknown[] };

@@ -256,7 +256,7 @@ export async function sophos(url: string): Promise<SophosResult> {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: buffer as unknown as BodyInit,
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const responseBuffer = new Uint8Array(await res.arrayBuffer());

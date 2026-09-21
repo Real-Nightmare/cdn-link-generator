@@ -264,7 +264,7 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
     const probeList = [...plan.urls, ...hosts.map((h) => `https://${h}/`)];
     const { results } = await checkDomains(
       probeList,
-      Math.min(Math.max(msg.concurrency, 2), 24),
+      Math.min(Math.max(msg.concurrency, 2), 48),
       postFilterProgress,
       shouldAbort,
     );
@@ -381,14 +381,27 @@ async function runCopyText(msg: { gen: number; scope: string }): Promise<void> {
     if (msg.scope === "safe" && !state.filter.plan) {
       throw new Error("No safe links yet — run the Filter Checker first");
     }
-    const parts: string[] = [];
+    // Copy builds chunked with a hard ceiling. Anything at/over the Gofile
+    // threshold uploads instead of failing: the clipboard gets a shareable
+    // link, which is also what users actually want for huge lists.
+    const chunks: string[] = [];
     let size = 0;
     for (const url of scopedUrls(msg.scope)) {
       size += url.length + 1;
       if (size > COPY_CHAR_LIMIT) throw new Error("Too many links to copy — use a download instead");
-      parts.push(url);
+      chunks[chunks.length - 1] === undefined || chunks[chunks.length - 1].length >= 1_000_000
+        ? chunks.push(url)
+        : (chunks[chunks.length - 1] += "\n" + url);
     }
-    post({ type: "copyText", gen: msg.gen, text: parts.join("\n") });
+    if (shouldOffloadToGofile(chunks, 0)) {
+      const mb = Math.round(chunkSize(chunks) / 1048576);
+      post({ type: "exportProgress", gen: msg.gen, payload: { message: `Copy list too big for the clipboard (~${mb} MB) — uploading to Gofile.io…` } });
+      const blob = new Blob(chunks.map((c) => new Blob([c], { type: "text/plain" })));
+      const up = await uploadToGofile(blob, `cdn_links_copy_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`);
+      post({ type: "copyText", gen: msg.gen, text: up.url });
+      return;
+    }
+    post({ type: "copyText", gen: msg.gen, text: chunks.join("\n") });
   } catch (err) {
     post({ type: "error", gen: msg.gen, message: err instanceof Error ? err.message : String(err) });
   }
@@ -412,6 +425,8 @@ async function runExport(msg: {
     // Per-filter unblocked export (Filter Checker panel buttons): keep URLs
     // whose per-filter verdict for THIS filter is unblocked (probed keys use
     // their merged verdict; unsampled keys inherit the host verdict).
+    // STREAMING: never materializes a `chosen[]` array — a 12M-link filtered
+    // export is ~1GB as an array (tab crash); chunked it's ~flat memory.
     if (msg.filterName) {
       if (!state.filter.plan) throw new Error("Run the Filter Checker first");
       const byDomain = new Map<string, DomainFilterResult>();
@@ -419,18 +434,21 @@ async function runExport(msg: {
         const d = keyOfTargetDomain(r.domain);
         if (r.domain === d) byDomain.set(d, r);
       }
-      const chosen: string[] = [];
-      for (const e of iterUrlEntries(state.result.set)) {
-        const key = keyOf(e.url);
-        const entry = state.filter.byKey.get(key);
-        const domain = keyOfTargetDomain(key);
-        const v = entry
-          ? entry.results.find((x) => x.name === msg.filterName)
-          : byDomain.get(domain)?.results.find((x) => x.name === msg.filterName);
-        if (!v || v.error || !v.blocked) chosen.push(e.url);
-      }
       const chunks: string[] = [];
-      await buildTextChunks(chosen, (c) => chunks.push(c));
+      await buildTextChunks(
+        (function* (): Generator<string> {
+          for (const e of iterUrlEntries(state.result!.set)) {
+            const key = keyOf(e.url);
+            const entry = state.filter.byKey.get(key);
+            const domain = keyOfTargetDomain(key);
+            const v = entry
+              ? entry.results.find((x) => x.name === msg.filterName)
+              : byDomain.get(domain)?.results.find((x) => x.name === msg.filterName);
+            if (!v || v.error || !v.blocked) yield e.url;
+          }
+        })(),
+        (c) => chunks.push(c),
+      );
       await postExport(msg, { chunks });
       return;
     }

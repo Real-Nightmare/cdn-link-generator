@@ -218,9 +218,11 @@ export function pathRefCounts(src: LinkSource): Map<string, number> {
 // Filter-check planning — the fast path that never walks the full dataset.
 // ---------------------------------------------------------------------------
 
-/** Probing budget per serving host. Must stay in sync with the runner's
- * own per-host reservoir cap (the plan feeds at most this many). */
-export const FILTER_PROBES_PER_HOST = 200;
+/** Probing budget per serving host. 40 sampled paths is plenty: host-level
+ * engines cover EVERY URL on the host, and the path-aware sample only needs
+ * to catch path-pattern blocks (newest commit always included). Small plan =
+ * fast run — a 45M-link check finishes in well under a minute. */
+export const FILTER_PROBES_PER_HOST = 40;
 
 /** The host that ACTUALLY serves this slot's URLs for a source. Pages URLs
  * live on owner.github.io (not a provider domain) and bunny on the user's

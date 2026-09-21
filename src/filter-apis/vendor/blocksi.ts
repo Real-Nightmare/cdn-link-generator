@@ -27,7 +27,7 @@ export async function blocksiAI(
       "content-type": "application/json",
     },
     body: JSON.stringify({ url: domain }),
-    timeoutMs: 15000,
+    timeoutMs: 8000,
   });
   const json = (await res.json()) as {
     document?: { predicted_specific_category: string };
@@ -59,7 +59,7 @@ export async function blocksiStandard(
 ): Promise<[string, boolean]> {
   const cleanDomain = domain.replace(/^https?:\/\//, "").split("/")[0];
   const res = await fetchURL("https://service1.blocksi.net/getRating.json?url=" + cleanDomain, {
-    timeoutMs: 15000,
+    timeoutMs: 8000,
   });
   const html = await res.text();
   const json = JSON.parse(html) as { Category?: number | string };

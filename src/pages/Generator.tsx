@@ -438,6 +438,32 @@ export default function Generator() {
     setTimeout(() => setCopied(null), 2000);
   }
 
+  /** Exports ≥20MB become a Gofile link instead of a slow local download —
+   * the link is auto-copied to the clipboard so it can be shared instantly. */
+  async function deliverGofileLink(url: string, what: string) {
+    setNotice({ kind: "link", text: `${what} is ready as a shareable Gofile.io link (also copied to your clipboard):`, url });
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+    } catch {
+      // Non-secure-context fallback.
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        copied = document.execCommand("copy");
+        ta.remove();
+      } catch {
+        copied = false;
+      }
+    }
+    if (!copied) setNotice({ kind: "link", text: `${what} is ready as a shareable Gofile.io link (clipboard blocked — copy it from here):`, url });
+  }
+
   async function handleDownload(kind: "txt" | "csv" | "json" | "zip") {
     if (!summary || summary.totalUrls === 0) return;
     const suffix = downloadScope === "all" ? "" : `_${downloadScope}`;
@@ -455,7 +481,7 @@ export default function Generator() {
         filename: `cdn_links_${name}${suffix}_${timestamp()}.${kind}`,
       });
       if (filename.startsWith("GOFILE:")) {
-        setNotice({ kind: "link", text: `Export too large for a direct download — uploaded to Gofile.io:`, url: filename.slice(7) });
+        await deliverGofileLink(filename.slice(7), "Your export");
         return;
       }
       if (!buf) throw new Error("Export returned no data");
@@ -474,7 +500,7 @@ export default function Generator() {
         filterName,
       });
       if (filename.startsWith("GOFILE:")) {
-        setNotice({ kind: "link", text: `Export too large for a direct download — uploaded to Gofile.io:`, url: filename.slice(7) });
+        await deliverGofileLink(filename.slice(7), `Unblocked-by-${filterName} export`);
         return;
       }
       if (!buf) throw new Error("Export returned no data");

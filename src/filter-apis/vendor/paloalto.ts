@@ -14,7 +14,7 @@ export async function palo(targetUrl: string): Promise<[string, boolean]> {
       Accept: "application/json,text/html,*/*",
       Referer: "https://urlfiltering.paloaltonetworks.com/",
     },
-    timeoutMs: 15000,
+    timeoutMs: 8000,
   });
 
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

@@ -71,12 +71,11 @@ async function runSubset(defsToRun: FilterDef[], url: string): Promise<FilterRes
   );
 }
 
-/** Max distinct host+path probes kept per host. A 10k-file × 70-commit repo
- * has up to 700k unique serving URLs — probing every one would take days and
- * the result payload would be gigabytes. 200 sampled paths per host keeps
- * verdicts representative (reservoir-sampled, unbiased) while host-level
- * engines still cover EVERY URL on the host. */
-const MAX_PATH_PROBES_PER_HOST = 200;
+/** Max distinct host+path probes kept per host. Must stay in sync with the
+ * plan's FILTER_PROBES_PER_HOST (linkset.ts). 40 sampled paths per host is
+ * plenty — host-level engines still cover EVERY URL on the host — and it
+ * keeps the whole filter run under a minute even on huge datasets. */
+const MAX_PATH_PROBES_PER_HOST = 40;
 
 /**
  * Check serving URLs with bounded concurrency.
@@ -159,7 +158,7 @@ export async function checkDomains(
     }
   }
 
-  const workers = Math.max(1, Math.min(concurrency, total));
+  const workers = Math.max(1, Math.min(Math.max(concurrency, 2), 48, total));
   await Promise.all(Array.from({ length: workers }, worker));
   report(true);
 

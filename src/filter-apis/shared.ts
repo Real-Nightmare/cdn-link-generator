@@ -3,7 +3,7 @@
 
 import type { FilterDef } from "./types";
 
-const FILTER_TIMEOUT_MS = 6000;
+const FILTER_TIMEOUT_MS = 4000;
 
 export function hostOf(url: string): string {
   try {

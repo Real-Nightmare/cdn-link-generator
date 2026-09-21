@@ -44,7 +44,7 @@ export class LightspeedClient {
   private connectFails = 0;
   private unavailableUntil = 0;
 
-  constructor({ timeoutMs = 12000 }: { timeoutMs?: number } = {}) {
+  constructor({ timeoutMs = 8000 }: { timeoutMs?: number } = {}) {
     this.timeoutMs = timeoutMs;
   }
 
