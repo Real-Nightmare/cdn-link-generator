@@ -370,6 +370,10 @@ export interface FilterVerdictLookup {
 export interface FilterCountResult {
   /** Per-filter blocked URL counts (arithmetically weighted). */
   perFilterBlocked: Record<string, number>;
+  /** Per-filter ERROR counts — URLs whose verdict for that filter is
+   * UNKNOWN (timeout, endpoint down, socket blocked). A filter must never
+   * quietly fold these into "unblocked". */
+  perFilterErrors: Record<string, number>;
   /** URLs flagged by the aggregate "any filter" verdict. */
   blockedAgg: number;
   /** Probe keys whose aggregate verdict is blocked (the small set). */
@@ -393,7 +397,11 @@ export function countFilterVerdicts(
   filterNames: string[],
 ): FilterCountResult {
   const perFilterBlocked: Record<string, number> = {};
-  for (const name of filterNames) perFilterBlocked[name] = 0;
+  const perFilterErrors: Record<string, number> = {};
+  for (const name of filterNames) {
+    perFilterBlocked[name] = 0;
+    perFilterErrors[name] = 0;
+  }
   let blockedAgg = 0;
   const blockedKeys = new Set<string>();
 
@@ -417,14 +425,23 @@ export function countFilterVerdicts(
       if (hostOf(key) !== host) continue;
       probedMult += mult;
       const entry = byKey.get(key);
-      if (!entry) continue; // aborted mid-run — remainder falls back below
+      if (!entry) {
+        // Aborted mid-run — no verdicts at all for this key: count every
+        // filter as unverified rather than silently shrinking its totals.
+        for (const name of filterNames) perFilterErrors[name] += mult;
+        continue;
+      }
       if (entry.blocked) {
         blockedAgg += mult;
         blockedKeys.add(key);
       }
       for (const name of filterNames) {
         const v = entry.results.find((e) => e.name === name);
-        if (v && !v.error && v.blocked) perFilterBlocked[name] += mult;
+        if (!v || v.error) {
+          perFilterErrors[name] += mult;
+        } else if (v.blocked) {
+          perFilterBlocked[name] += mult;
+        }
       }
     }
 
@@ -433,10 +450,14 @@ export function countFilterVerdicts(
       if (hostEntry.blocked) blockedAgg += unsampled;
       for (const name of filterNames) {
         const v = hostVerdict.get(name);
-        if (v && !v.error && v.blocked) perFilterBlocked[name] += unsampled;
+        if (!v || v.error) {
+          perFilterErrors[name] += unsampled;
+        } else if (v.blocked) {
+          perFilterBlocked[name] += unsampled;
+        }
       }
     }
   }
 
-  return { perFilterBlocked, blockedAgg, blockedKeys, safeCount: set.totalUrls - blockedAgg };
+  return { perFilterBlocked, perFilterErrors, blockedAgg, blockedKeys, safeCount: set.totalUrls - blockedAgg };
 }

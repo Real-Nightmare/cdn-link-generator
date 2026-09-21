@@ -43,6 +43,12 @@ export class LightspeedClient {
    * burning 12s per target on blocked networks. Self-heals after 60s. */
   private connectFails = 0;
   private unavailableUntil = 0;
+  /** Host verdict cache + in-flight dedup: the verdict is a property of the
+   * HOST (dy_lookup is host-keyed), so identical hosts — and repeat runs —
+   * are answered from here instead of another network round trip, and a
+   * path probe can never race into a different verdict than the host probe. */
+  private hostCache = new Map<string, { category: string; blocked: boolean }>();
+  private inflight = new Map<string, Promise<{ category: string; blocked: boolean }>>();
 
   constructor({ timeoutMs = 8000 }: { timeoutMs?: number } = {}) {
     this.timeoutMs = timeoutMs;
@@ -136,6 +142,20 @@ export class LightspeedClient {
     if (this.closed) throw new Error("lightspeed client closed");
     host = String(host).toLowerCase().replace(/^www\./, "").replace(/^https?:\/\//, "").split("/")[0];
 
+    // The verdict is per-host: cache it and answer every probe of the same
+    // host — full URLs and bare hosts alike — with the SAME verdict.
+    const cached = this.hostCache.get(host);
+    if (cached) return cached;
+
+    const inFlight = this.inflight.get(host);
+    if (inFlight) return inFlight;
+
+    const p = this.lookupUncached(host).finally(() => this.inflight.delete(host));
+    this.inflight.set(host, p);
+    return p;
+  }
+
+  private async lookupUncached(host: string): Promise<{ category: string; blocked: boolean }> {
     await this.connect();
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("lightspeed not connected");
@@ -154,6 +174,7 @@ export class LightspeedClient {
       const waiter: Waiter = {
         resolve: (v) => {
           clearTimeout(timer);
+          this.hostCache.set(host, v); // authoritative — cache for every future probe of this host
           resolve(v);
         },
         reject: (e) => {
@@ -179,6 +200,14 @@ export class LightspeedClient {
     }
     this.ws = null;
     this.ready = null;
+  }
+
+  /** Is there a live OPEN socket right now that could carry a retry? The
+   * runner checks this before re-running a timed-out host: no socket means
+   * the retry would just pay another full timeout for nothing (the connect
+   * path re-opens asynchronously and is governed by the circuit breaker). */
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 }
 

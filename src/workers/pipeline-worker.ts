@@ -282,8 +282,16 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
     );
     state.filter.blockedKeys = counts.blockedKeys;
     state.filter.filterSafeCount = counts.safeCount;
+    // Honest per-filter numbers: "unblocked" is URLs this filter actually
+    // ANSWERED and did not block. Verdicts it never produced (timeout,
+    // endpoint down, socket blocked) surface separately as unverified so a
+    // dead engine can no longer pad its unblocked total.
     const unblockedCounts: Record<string, number> = {};
-    for (const f of FILTER_DEFS) unblockedCounts[f.name] = state.totalUrls - counts.perFilterBlocked[f.name];
+    const unverifiedCounts: Record<string, number> = {};
+    for (const f of FILTER_DEFS) {
+      unblockedCounts[f.name] = Math.max(0, state.totalUrls - counts.perFilterBlocked[f.name] - counts.perFilterErrors[f.name]);
+      unverifiedCounts[f.name] = counts.perFilterErrors[f.name];
+    }
 
     // UI card list — small (one entry per probed target).
     post({
@@ -293,6 +301,7 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
         results,
         filterSafeCount: state.filter.filterSafeCount,
         unblockedCounts,
+        unverifiedCounts,
         sampled: plan.sampled,
       },
     });
@@ -444,7 +453,9 @@ async function runExport(msg: {
             const v = entry
               ? entry.results.find((x) => x.name === msg.filterName)
               : byDomain.get(domain)?.results.find((x) => x.name === msg.filterName);
-            if (!v || v.error || !v.blocked) yield e.url;
+            // Fail closed: an errored/missing verdict means UNKNOWN, and an
+            // unknown link must NOT land in the "unblocked by X" download.
+            if (v && !v.error && !v.blocked) yield e.url;
           }
         })(),
         (c) => chunks.push(c),

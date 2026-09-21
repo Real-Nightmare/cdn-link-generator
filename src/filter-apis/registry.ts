@@ -159,7 +159,12 @@ export const FILTERS: FilterDef[] = [
     description: "Lightspeed Filter (Rocket) — live WebSocket agent lookup",
     kind: "socket",
     run: async (input) => {
-      const v = await getSharedLightspeed().lookup(target(input).host);
+      // dy_lookup is HOST-keyed — the client normalizes to the host, caches
+      // one verdict per host, and answers every URL on that host (full URLs
+      // and bare hosts alike) with the SAME verdict. Pass the raw input so
+      // the client's host cache is the single source of truth; a timeout or
+      // blocked socket propagates as an ERROR (never a silent "unblocked").
+      const v = await getSharedLightspeed().lookup(input);
       return { blocked: !!v.blocked, category: v.category };
     },
   },
@@ -281,7 +286,16 @@ export const FILTERS: FilterDef[] = [
       // SXL4 speaks binary protobuf with CORS headers — works straight from
       // the browser via the vendored encoder/decoder in vendor/sophos.ts.
       const r = await sophos(target(input).full);
-      if (!r.found) return { category: "Uncategorized", blocked: false };
+      // Fail CLOSED on engine-side unknowns: HIGH risk or a threat name is a
+      // definite block, but an UNCLASSIFIED risk with no category means Sophos
+      // itself has no data — reporting that as "unblocked" let one clear
+      // engine vouch for URLs nothing actually checked.
+      if (!r.found) throw new Error("sophos: not in database");
+      if (
+        (r.riskLevelNum ?? 0) >= 4 &&
+        !(r.productivityCategoryNum ?? 0)
+      )
+        throw new Error("sophos: high risk, uncategorized");
       const blocked =
         !!r.isThreat ||
         (r.riskLevelNum ?? 0) >= 4 ||
@@ -289,6 +303,7 @@ export const FILTERS: FilterDef[] = [
       return {
         category: (r.productivityCategory ?? "UNCATEGORIZED") + (r.isThreat ? ` / ${r.threat}` : ""),
         blocked,
+        risk: r.riskLevel,
       };
     },
   },

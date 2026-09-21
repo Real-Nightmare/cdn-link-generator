@@ -118,6 +118,7 @@ export default function Generator() {
   const [filterResults, setFilterResults] = useState<DomainFilterResult[] | null>(null);
   const [filterSampled, setFilterSampled] = useState(false);
   const [unblockedCounts, setUnblockedCounts] = useState<Record<string, number> | null>(null);
+  const [unverifiedCounts, setUnverifiedCounts] = useState<Record<string, number> | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
 
   const [pkgVersions, setPkgVersions] = useState<PackageVersion[] | null>(null);
@@ -419,6 +420,7 @@ export default function Generator() {
       setFilterResults(res.results);
       setFilterSampled(res.sampled === true);
       setUnblockedCounts(res.unblockedCounts);
+      setUnverifiedCounts(res.unverifiedCounts ?? null);
       setSummary((s) => (s ? { ...s, filterSafeCount: res.filterSafeCount } : s));
     } catch (err) {
       setFilterError(err instanceof Error ? err.message : String(err));
@@ -1211,19 +1213,26 @@ export default function Generator() {
                           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                             Filter Checker — {filterResults.length.toLocaleString()} serving URL{filterResults.length === 1 ? "" : "s"} probed
                             {filterSampled && " (large run: paths sampled per host — host verdicts cover every link)"}
-                          </p>
-                          <span
-                            className={`chip font-mono text-[11px] ${
-                              totalUrls - (summary.filterSafeCount ?? 0) > 0
-                                ? "border-warn/40 text-warn"
-                                : "border-accent/40 text-accent-soft"
-                            }`}
-                          >
-                            {totalUrls - (summary.filterSafeCount ?? 0) > 0
-                              ? `⚠ ${(totalUrls - (summary.filterSafeCount ?? 0)).toLocaleString()} links blocked at their serving URL`
-                              : "✓ no blocked URLs"}
-                          </span>
-                        </div>
+                          </p>                            <span
+                              className={`chip font-mono text-[11px] ${
+                                totalUrls - (summary.filterSafeCount ?? 0) > 0
+                                  ? "border-warn/40 text-warn"
+                                  : "border-accent/40 text-accent-soft"
+                              }`}
+                            >
+                              {totalUrls - (summary.filterSafeCount ?? 0) > 0
+                                ? `⚠ ${(totalUrls - (summary.filterSafeCount ?? 0)).toLocaleString()} links blocked at their serving URL`
+                                : "✓ no blocked URLs"}
+                            </span>
+                          </div>
+                          {unverifiedCounts && Object.values(unverifiedCounts).some((n) => n > 0) && (
+                            <p className="mt-1 text-[11px] text-warn">
+                              ⚠ {FILTERS.filter((f) => (unverifiedCounts[f.name] ?? 0) > 0)
+                                .map((f) => `${f.name}: ${(unverifiedCounts[f.name] ?? 0).toLocaleString()} unverified (no verdict)`)
+                                .join(" · ")}
+                              — those links are NOT counted as unblocked.
+                            </p>
+                          )}
                         <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                           {filterResults.slice(0, FILTER_CARDS_MAX).map((r) => (
                             <div
@@ -1290,6 +1299,7 @@ export default function Generator() {
                               {FILTERS.filter((f) => (filterSummary.find((s) => s.name === f.name)?.checked ?? 0) > 0).map(
                                 (f) => {
                                   const count = unblockedCounts[f.name] ?? 0;
+                                  const unverified = unverifiedCounts?.[f.name] ?? 0;
                                   return (
                                     <button
                                       key={f.name}
@@ -1297,9 +1307,14 @@ export default function Generator() {
                                       className={`chip font-mono text-[11px] ${
                                         count === 0 ? "opacity-40" : "hover:border-accent/50 hover:text-accent-soft"
                                       }`}
-                                      title={`${count} links NOT blocked by ${f.name}`}
+                                      title={
+                                        unverified > 0
+                                          ? `${count.toLocaleString()} links verified NOT blocked by ${f.name} — ${unverified.toLocaleString()} unverified (no verdict, excluded)`
+                                          : `${count} links NOT blocked by ${f.name}`
+                                      }
                                     >
-                                      ⬇ {f.name} ({count})
+                                      ⬇ {f.name} ({count.toLocaleString()})
+                                      {unverified > 0 && <span className="text-warn"> +{unverified.toLocaleString()} unverified</span>}
                                     </button>
                                   );
                                 },

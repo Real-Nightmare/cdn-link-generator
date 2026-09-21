@@ -14,6 +14,7 @@
 
 import type { DomainFilterResult, FilterDef, FilterResult } from "./types";
 import { FILTERS } from "./registry";
+import { getSharedLightspeed } from "./lightspeed";
 
 /** All engines that receive the full URL (host + path). The rest only get the
  * bare host — see registry.ts `run` implementations for what each endpoint
@@ -152,7 +153,16 @@ export async function checkDomains(
       const target = idx < hostPending.length ? hostPending[idx] : pathPending[idx - hostPending.length];
       const isHostProbe = idx < hostPending.length;
       const results = await runSubset(isHostProbe ? hostOnly : pathAware, isHostProbe ? `https://${target}/` : `https://${target}`);
-      cache.set(target, summarize(target, results));
+      const next = summarize(target, results);
+      const prev = cache.get(target);
+      // Never let a transient ENGINE ERROR overwrite a known verdict on a bare
+      // host entry: the host probe is the canonical Lightspeed answer for the
+      // whole host (its protocol is host-keyed), and a raced path probe that
+      // hits the same key must not clobber it with a timeout. Errors stay
+      // visible on path entries (they can carry path-specific verdicts); the
+      // honesty pass heals those after the pool drains.
+      const errored = next.results.some((r) => r.error);
+      cache.set(target, isHostProbe && prev && !prev.blocked && errored ? prev : next);
       done++;
       report();
     }
@@ -161,6 +171,69 @@ export async function checkDomains(
   const workers = Math.max(1, Math.min(Math.max(concurrency, 2), 48, total));
   await Promise.all(Array.from({ length: workers }, worker));
   report(true);
+
+  // ── Lightspeed honesty pass ─────────────────────────────────────────────
+  // Lightspeed is host-keyed: whatever the first probe of a host got is the
+  // verdict for every URL on it. If that first probe raced the WebSocket
+  // handshake (a hard timeout on a cold connect), the whole host would be
+  // branded "unblocked" forever — or its paths would sit at a stale error
+  // even after the host answered. Re-run Lightspeed once for EVERY cached
+  // entry whose LS verdict errored — by now the socket is open, the client's
+  // own per-host cache dedupes retries, and a host that genuinely can't
+  // answer keeps its visible per-filter error instead of an inflated
+  // "unblocked" count.
+  if (total > 0 && !shouldAbort?.()) {
+    const lsDef = FILTERS.find((f) => f.name === "Lightspeed");
+    // Retry only while a socket is actually OPEN — a socket that died (drop/
+    // error) makes every retry a guaranteed-timeout no-op, and healing a
+    // blocked network would just burn another full timeout per round. A
+    // host that still can't answer keeps its visible per-filter error —
+    // never a fabricated "unblocked" (fail closed).
+    if (lsDef && getSharedLightspeed().isConnected()) {
+      const stale: { key: string; probe: string }[] = [];
+      for (const t of hostPending)
+        if (cache.get(t)?.results.some((r) => r.name === "Lightspeed" && r.error))
+          stale.push({ key: t, probe: `https://${t}/` });
+      for (const t of pathPending)
+        if (cache.get(t)?.results.some((r) => r.name === "Lightspeed" && r.error))
+          stale.push({ key: t, probe: `https://${t}` });
+      // Insurance against pathological silent-server cases: the heal exists
+      // for the rare cold-socket race, so cap it — anything beyond this keeps
+      // its honest per-filter error instead of re-paying timeouts.
+      const staleCapped = stale.slice(0, 100);
+      if (staleCapped.length > 0) {
+        let done2 = 0;
+        const total2 = staleCapped.length;
+        const report2 = () => {
+          done2++;
+          onProgress?.(total + done2, total + total2);
+        };
+        let idx2 = 0;
+        const refresh = async () => {
+          while (idx2 < total2) {
+            if (shouldAbort?.()) return;
+            const { key, probe } = staleCapped[idx2++];
+            try {
+              const v = await lsDef.run(probe);
+              const blocked = typeof v === "object" && v !== null ? !!(v as { blocked?: boolean }).blocked : !!v;
+              const entry = cache.get(key);
+              if (entry) {
+                entry.results = entry.results.map((r) =>
+                  r.name === "Lightspeed" ? { name: "Lightspeed", blocked } : r,
+                );
+                entry.blocked = entry.results.some((r) => !r.error && r.blocked);
+              }
+            } catch {
+              // Still no answer — leave the per-filter error in place (fail
+              // closed: unknown is reported, never "unblocked").
+            }
+            report2();
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(6, staleCapped.length) }, refresh));
+      }
+    }
+  }
 
   // ── Assemble one result per target, merging host-only verdicts in ─────────
   const out: DomainFilterResult[] = [];
@@ -185,12 +258,24 @@ function merge(host: DomainFilterResult | undefined, path: DomainFilterResult): 
   const hostResults = (host?.results ?? []).filter((r) => !PATH_AWARE.has(r.name));
   const pathResults = path.results.filter((r) => PATH_AWARE.has(r.name));
   const results = [...hostResults, ...pathResults];
-  const decisive = results.filter((r) => !r.error);
+  const blockedHost = decisivelyBlocked(host);
+  const blockedPath = decisivelyBlocked(path);
   return {
     domain: path.domain,
     results,
-    blocked: decisive.some((r) => r.blocked),
+    // "Blocked" = at least ONE responding filter flags this target. A filter
+    // that ERRORed can't know (fail closed: errors never read as "unblocked"),
+    // and requiring every engine to agree would let a single clear DNS
+    // resolver hide a FortiGuard/Sophos path-level block — precisely the
+    // false "all clear" this checker used to report.
+    blocked: blockedHost || blockedPath,
   };
+}
+
+/** True when at least one filter with an actual verdict flags the target. */
+function decisivelyBlocked(entry: DomainFilterResult | undefined): boolean {
+  if (!entry) return false;
+  return entry.results.some((r) => !r.error && r.blocked);
 }
 
 /** True when no filter blocks this URL's probed target (unknown → safe). */

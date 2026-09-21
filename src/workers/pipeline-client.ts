@@ -36,7 +36,12 @@ export interface FilterDone {
     results: { name: string; blocked: boolean; error?: string }[];
   }[];
   filterSafeCount: number;
+  /** Per-filter count of URLs the filter actually answered and did NOT block. */
   unblockedCounts: Record<string, number>;
+  /** Per-filter count of URLs the filter produced NO verdict for (timeout,
+   * endpoint down, socket blocked) — shown separately, never folded into
+   * "unblocked". */
+  unverifiedCounts?: Record<string, number>;
   /** Path probes were reservoir-sampled (huge runs); host-level verdicts
    * still cover every URL. */
   sampled?: boolean;
