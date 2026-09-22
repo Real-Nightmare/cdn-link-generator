@@ -38,6 +38,9 @@ export interface FilterDone {
   filterSafeCount: number;
   /** Per-filter count of URLs the filter actually answered and did NOT block. */
   unblockedCounts: Record<string, number>;
+  /** Per-filter count of URLs the filter VERIFIED as blocked — link-weighted,
+   * matches the "blocked by X" per-filter download exactly. */
+  blockedCounts?: Record<string, number>;
   /** Per-filter count of URLs the filter produced NO verdict for (timeout,
    * endpoint down, socket blocked) — shown separately, never folded into
    * "unblocked". */
@@ -211,6 +214,8 @@ export const pipeline = {
     scope: "all" | "valid" | "safe";
     filename: string;
     filterName?: string;
+    /** Direction for per-filter exports: "clear" (default) or "blocked". */
+    filterMode?: "clear" | "blocked";
   }): Promise<{ buf: ArrayBuffer; filename: string }> {
     return call("export", args) as Promise<{ buf: ArrayBuffer; filename: string }>;
   },

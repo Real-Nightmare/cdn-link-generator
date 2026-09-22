@@ -16,7 +16,7 @@ import {
 } from "../lib/generate";
 import { validateLinks } from "../lib/github";
 import { checkDomains } from "../filter-apis/runner";
-import { FILTERS as FILTER_DEFS, type DomainFilterResult } from "../filter-apis/registry";
+import { FILTERS as FILTER_DEFS, PATH_AWARE_FILTERS, type DomainFilterResult } from "../filter-apis/registry";
 import {
   buildCsvChunks,
   buildJsonChunks,
@@ -298,12 +298,14 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
     //   unblocked + blocked + unverified = totalUrls (per filter).
     const unblockedCounts: Record<string, number> = {};
     const unverifiedCounts: Record<string, number> = {};
+    const blockedCounts: Record<string, number> = {};
     for (const f of FILTER_DEFS) {
       unverifiedCounts[f.name] = counts.perFilterErrors[f.name];
       unblockedCounts[f.name] = Math.max(
         0,
         state.totalUrls - counts.perFilterBlocked[f.name] - unverifiedCounts[f.name],
       );
+      blockedCounts[f.name] = counts.perFilterBlockedLinks[f.name];
     }
 
     // UI card list — small (one entry per probed target).
@@ -314,6 +316,7 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
         results,
         filterSafeCount: state.filter.filterSafeCount,
         unblockedCounts,
+        blockedCounts,
         unverifiedCounts,
         hostCoverage: counts.hostCoverage,
         sampled: plan.sampled,
@@ -438,6 +441,10 @@ async function runExport(msg: {
   scope: string;
   filename: string;
   filterName?: string;
+  /** Per-filter export direction: "clear" (default) = links the filter did
+   * NOT block; "blocked" = links the filter VERIFIED as blocked. Both fail
+   * closed — an errored/missing verdict lands in neither list. */
+  filterMode?: "clear" | "blocked";
 }): Promise<void> {
   try {
     if (!state.result || state.totalUrls === 0) {
@@ -447,11 +454,11 @@ async function runExport(msg: {
       throw new Error("No safe links yet — run the Filter Checker first");
     }
 
-    // Per-filter unblocked export (Filter Checker panel buttons): keep URLs
-    // whose per-filter verdict for THIS filter is unblocked (probed keys use
-    // their merged verdict; unsampled keys inherit the host verdict).
-    // STREAMING: never materializes a `chosen[]` array — a 12M-link filtered
-    // export is ~1GB as an array (tab crash); chunked it's ~flat memory.
+    // Per-filter export (Filter Checker panel chips): "clear" keeps URLs whose
+    // per-filter verdict for THIS filter is NOT blocked; "blocked" keeps URLs
+    // the filter VERIFIED as blocked. STREAMING: never materializes a
+    // `chosen[]` array — a 12M-link filtered export is ~1GB as an array (tab
+    // crash); chunked it's ~flat memory.
     if (msg.filterName) {
       if (!state.filter.plan) throw new Error("Run the Filter Checker first");
       const byDomain = new Map<string, DomainFilterResult>();
@@ -459,19 +466,28 @@ async function runExport(msg: {
         const d = keyOfTargetDomain(r.domain);
         if (r.domain === d) byDomain.set(d, r);
       }
+      const wantBlocked = msg.filterMode === "blocked";
+      // Path-aware engines carry a verdict per DISTINCT path: unsampled paths
+      // have NO observed verdict there, so they land in NEITHER list (mirrors
+      // countFilterVerdicts — chip counts and downloads always agree).
+      // Host-keyed engines decided the whole host at once, so unsampled paths
+      // inherit the bare-host verdict in BOTH directions.
+      const pathAware = PATH_AWARE_FILTERS.has(msg.filterName);
       const chunks: string[] = [];
       await buildTextChunks(
         (function* (): Generator<string> {
           for (const e of iterUrlEntries(state.result!.set)) {
             const key = keyOf(e.url);
             const entry = state.filter.byKey.get(key);
-            const domain = keyOfTargetDomain(key);
-            const v = entry
-              ? entry.results.find((x) => x.name === msg.filterName)
-              : byDomain.get(domain)?.results.find((x) => x.name === msg.filterName);
+            let v: { blocked: boolean; error?: string } | undefined;
+            if (entry) {
+              v = entry.results.find((x) => x.name === msg.filterName);
+            } else if (!pathAware) {
+              v = byDomain.get(keyOfTargetDomain(key))?.results.find((x) => x.name === msg.filterName);
+            }
             // Fail closed: an errored/missing verdict means UNKNOWN, and an
-            // unknown link must NOT land in the "unblocked by X" download.
-            if (v && !v.error && !v.blocked) yield e.url;
+            // unknown link must NOT land in the "clear" OR the "blocked" list.
+            if (v && !v.error && v.blocked === wantBlocked) yield e.url;
           }
         })(),
         (c) => chunks.push(c),

@@ -446,6 +446,10 @@ export interface FilterCountResult {
   hostCoverage: { host: string; urls: number; distinctPaths: number; probed: number }[];
   /** URLs flagged by the aggregate "any filter" verdict. */
   blockedAgg: number;
+  /** Per-filter count of dataset URLs the filter VERIFIED as blocked —
+   * host-weighted, matches the per-filter export iterators exactly, so the
+   * per-filter "blocked by X" download's size is known before building it. */
+  perFilterBlockedLinks: Record<string, number>;
   /** Probe keys whose aggregate verdict is blocked (the small set). */
   blockedKeys: Set<string>;
   /** Hosts whose bare-host probe is BLOCKED by a host-keyed engine — every
@@ -480,10 +484,12 @@ export function countFilterVerdicts(
   const perFilterBlocked: Record<string, number> = {};
   const perFilterErrors: Record<string, number> = {};
   const perFilterVerified: Record<string, number> = {};
+  const perFilterBlockedLinks: Record<string, number> = {};
   for (const name of filterNames) {
     perFilterBlocked[name] = 0;
     perFilterErrors[name] = 0;
     perFilterVerified[name] = 0;
+    perFilterBlockedLinks[name] = 0;
   }
   let blockedAgg = 0;
   const blockedKeys = new Set<string>();
@@ -527,7 +533,10 @@ export function countFilterVerdicts(
           perFilterErrors[name] += mult;
         } else {
           perFilterVerified[name] += mult;
-          if (v.blocked) perFilterBlocked[name] += mult;
+          if (v.blocked) {
+            perFilterBlocked[name] += mult;
+            perFilterBlockedLinks[name] += mult;
+          }
         }
       }
     }
@@ -551,7 +560,10 @@ export function countFilterVerdicts(
             perFilterErrors[name] += unsampled;
           } else {
             perFilterVerified[name] += unsampled;
-            if (v.blocked) perFilterBlocked[name] += unsampled;
+            if (v.blocked) {
+              perFilterBlocked[name] += unsampled;
+              perFilterBlockedLinks[name] += unsampled;
+            }
           }
         }
       }
@@ -571,6 +583,7 @@ export function countFilterVerdicts(
     perFilterBlocked,
     perFilterErrors,
     perFilterVerified,
+    perFilterBlockedLinks,
     hostCoverage,
     blockedAgg,
     blockedKeys,

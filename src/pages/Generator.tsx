@@ -119,6 +119,7 @@ export default function Generator() {
   const [filterResults, setFilterResults] = useState<DomainFilterResult[] | null>(null);
   const [filterSampled, setFilterSampled] = useState(false);
   const [unblockedCounts, setUnblockedCounts] = useState<Record<string, number> | null>(null);
+  const [blockedCounts, setBlockedCounts] = useState<Record<string, number> | null>(null);
   const [unverifiedCounts, setUnverifiedCounts] = useState<Record<string, number> | null>(null);
   const [hostCoverage, setHostCoverage] = useState<FilterDone["hostCoverage"] | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
@@ -339,6 +340,8 @@ export default function Generator() {
     setFilterProgress(null);
     setFilterResults(null);
     setUnblockedCounts(null);
+    setBlockedCounts(null);
+    setUnverifiedCounts(null);
     setHostCoverage(null);
     setFilterError(null);
     setLinksOpen(false);
@@ -423,6 +426,7 @@ export default function Generator() {
       setFilterResults(res.results);
       setFilterSampled(res.sampled === true);
       setUnblockedCounts(res.unblockedCounts);
+      setBlockedCounts(res.blockedCounts ?? null);
       setUnverifiedCounts(res.unverifiedCounts ?? null);
       setHostCoverage(res.hostCoverage ?? null);
       setSummary((s) => (s ? { ...s, filterSafeCount: res.filterSafeCount } : s));
@@ -497,16 +501,21 @@ export default function Generator() {
     }
   }
 
-  async function handlePerFilterDownload(filterName: string) {
+  async function handlePerFilterDownload(filterName: string, filterMode: "clear" | "blocked") {
     try {
+      const base = filterName.replace(/[^\w.-]+/g, "-");
       const { buf, filename } = await pipeline.export({
         kind: "txt",
         scope: "all",
-        filename: `unblocked_by_${filterName.replace(/[^\w.-]+/g, "-")}_${timestamp()}.txt`,
+        filename:
+          filterMode === "blocked"
+            ? `blocked_by_${base}_${timestamp()}.txt`
+            : `unblocked_by_${base}_${timestamp()}.txt`,
         filterName,
+        filterMode,
       });
       if (filename.startsWith("GOFILE:")) {
-        await deliverGofileLink(filename.slice(7), `Unblocked-by-${filterName} export`);
+        await deliverGofileLink(filename.slice(7), `${filterMode === "blocked" ? "Blocked" : "Unblocked"}-by-${filterName} export`);
         return;
       }
       if (!buf) throw new Error("Export returned no data");
@@ -1323,44 +1332,47 @@ export default function Generator() {
                               .map((s) => `${s.name}: ${s.hits}`)
                               .join(" · ")}
                           </p>
-                        )}
-
-                        {/* Per-filter unblocked downloads: pick the filter whose verdict
-                            matters for your community and export exactly those links.
-                            Counts are precomputed in the worker. */}
-                        {unblockedCounts && Object.values(unblockedCounts).some((n) => n > 0) && (
+                        )}                        {/* Per-filter downloads: EVERY filter gets two exports — the links it did NOT block (clear) and the links it VERIFIED as blocked. Counts are precomputed in the worker. */}
+                        {unblockedCounts && Object.keys(unblockedCounts).length > 0 && (
                           <div className="mt-4 border-t border-ink-700 pt-3">
                             <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                              Download links unblocked by…
+                              Download links per filter — individually
                             </p>
                             <div className="flex flex-wrap gap-1.5">
-                              {FILTERS.filter((f) => (filterSummary.find((s) => s.name === f.name)?.checked ?? 0) > 0).map(
-                                (f) => {
-                                  const count = unblockedCounts[f.name] ?? 0;
-                                  const unverified = unverifiedCounts?.[f.name] ?? 0;
-                                  return (
+                              {FILTERS.map((f) => {
+                                const count = unblockedCounts[f.name] ?? 0;
+                                const blocked = blockedCounts?.[f.name] ?? 0;
+                                const unverified = unverifiedCounts?.[f.name] ?? 0;
+                                return (
+                                  <div key={f.name} className="flex items-center gap-1">
                                     <button
-                                      key={f.name}
-                                      onClick={() => handlePerFilterDownload(f.name)}
-                                      className={`chip font-mono text-[11px] ${
-                                        count === 0 ? "opacity-40" : "hover:border-accent/50 hover:text-accent-soft"
-                                      }`}
+                                      onClick={() => handlePerFilterDownload(f.name, "clear")}
+                                      className="chip font-mono text-[11px] hover:border-accent/50 hover:text-accent-soft"
                                       title={
                                         unverified > 0
                                           ? `${count.toLocaleString()} links verified NOT blocked by ${f.name} — ${unverified.toLocaleString()} unverified (no verdict, excluded)`
-                                          : `${count} links NOT blocked by ${f.name}`
+                                          : `${count.toLocaleString()} links NOT blocked by ${f.name}`
                                       }
                                     >
                                       ⬇ {f.name} ({count.toLocaleString()})
                                       {unverified > 0 && <span className="text-warn"> +{unverified.toLocaleString()} unverified</span>}
                                     </button>
-                                  );
-                                },
-                              )}
+                                    {blocked > 0 && (
+                                      <button
+                                        onClick={() => handlePerFilterDownload(f.name, "blocked")}
+                                        className="chip font-mono text-[11px] text-danger/90 hover:border-danger/60 hover:text-danger"
+                                        title={`${blocked.toLocaleString()} links ${f.name} VERIFIED as blocked`}
+                                      >
+                                        ⛔ {blocked.toLocaleString()}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                             <p className="mt-2 text-[11px] text-slate-500">
-                              Each button exports only the links that filter did NOT flag —
-                              e.g. pick Lightspeed if that's what your school runs.
+                              ⬇ exports only the links that filter did NOT flag — pick Lightspeed if that's what your school runs.
+                              ⛔ exports only the links that filter verified as blocked. Unknown (unverified) links land in neither list.
                             </p>
                           </div>
                         )}
