@@ -10,17 +10,21 @@
 //
 // Caching: one entry per probed target. Host-only entries are cached per host
 // and shared across all paths on that host; path-aware entries are cached per
-// distinct host+path.
+// distinct host+path. Per-engine circuit breakers trip within a run when an
+// engine fails every probe (dead endpoint/blocked socket), so the run pays
+// each engine's timeout a bounded number of times instead of once per probe.
 
 import type { DomainFilterResult, FilterDef, FilterResult } from "./types";
-import { FILTERS } from "./registry";
+import { FILTERS, PATH_AWARE_FILTERS } from "./registry";
 import { getSharedLightspeed } from "./lightspeed";
+import { FILTER_PROBES_PER_HOST } from "../lib/linkset";
 
 /** All engines that receive the full URL (host + path). The rest only get the
  * bare host — see registry.ts `run` implementations for what each endpoint
  * actually accepts (Lightspeed, Deledao and Barracuda are host-keyed; the DNS
- * resolvers can only resolve hostnames). */
-const PATH_AWARE = new Set(["FortiGuard", "Blocksi Web", "Blocksi AI", "Linewize", "Senso Cloud", "Sophos"]);
+ * resolvers can only resolve hostnames). Single source of truth lives in the
+ * registry; the counting logic in linkset.ts imports the same set. */
+const PATH_AWARE = PATH_AWARE_FILTERS;
 
 /** Strip the scheme, keep host + path + query — the canonical probe key. */
 function targetKeyOf(url: string): string {
@@ -34,6 +38,7 @@ const cache = new Map<string, DomainFilterResult>();
 
 export function clearFilterCache(): void {
   cache.clear();
+  engineStats.clear();
 }
 
 /** Filter name → FilterDef, for splitting engines by scope. */
@@ -57,15 +62,52 @@ function summarize(target: string, results: FilterResult[]): DomainFilterResult 
   };
 }
 
-/** Run exactly the given subset of engines against one URL. */
+/** Per-run circuit breaker, per engine: once an engine has failed ≥3
+ * consecutive probes (or 25% of probes, min 3) with ZERO successes, every
+ * further probe of that engine fails instantly for the remainder of the run.
+ * This is what makes a 300-probe run with one dead engine finish in seconds
+ * instead of one-timeout × 300. Results stay honest: failed probes still
+ * record an error verdict (fail closed), they just stop PAYING the timeout. */
+const BREAKER_FAIL_THRESHOLD = 3;
+const BREAKER_MIN_SAMPLE = 3;
+interface EngineStats { attempts: number; fails: number; tripped: boolean }
+const engineStats = new Map<string, EngineStats>();
+export function resetEngineBreakers(): void {
+  engineStats.clear();
+}
+function breakerOpen(name: string): boolean {
+  const s = engineStats.get(name);
+  return !!s?.tripped;
+}
+function recordEngine(name: string, ok: boolean): void {
+  let s = engineStats.get(name);
+  if (!s) engineStats.set(name, (s = { attempts: 0, fails: 0, tripped: false }));
+  s.attempts++;
+  if (ok) {
+    s.fails = 0;
+    return;
+  }
+  s.fails++;
+  if (!s.tripped && s.attempts >= BREAKER_MIN_SAMPLE && s.fails >= Math.min(BREAKER_FAIL_THRESHOLD, s.attempts) && s.fails === s.attempts) {
+    s.tripped = true;
+  }
+}
+
+/** Run exactly the given subset of engines against one URL, honoring the
+ * per-engine breaker: a tripped engine returns an instant error verdict. */
 async function runSubset(defsToRun: FilterDef[], url: string): Promise<FilterResult[]> {
   return Promise.all(
     defsToRun.map(async (f): Promise<FilterResult> => {
+      if (breakerOpen(f.name)) {
+        return { name: f.name, blocked: false, error: "engine offline (auto-skipped this run)" };
+      }
       try {
         const r = await f.run(url);
         const blocked = typeof r === "object" && r !== null ? !!(r as { blocked?: boolean }).blocked : !!r;
+        recordEngine(f.name, true);
         return { name: f.name, blocked };
       } catch (e) {
+        recordEngine(f.name, false);
         return { name: f.name, blocked: false, error: e instanceof Error ? e.message : String(e) };
       }
     }),
@@ -73,10 +115,10 @@ async function runSubset(defsToRun: FilterDef[], url: string): Promise<FilterRes
 }
 
 /** Max distinct host+path probes kept per host. Must stay in sync with the
- * plan's FILTER_PROBES_PER_HOST (linkset.ts). 40 sampled paths per host is
- * plenty — host-level engines still cover EVERY URL on the host — and it
- * keeps the whole filter run under a minute even on huge datasets. */
-const MAX_PATH_PROBES_PER_HOST = 40;
+ * plan's probe budget (linkset.ts) — the plan already emits ≤ maxPerHost
+ * distinct keys per host, so the reservoir is just a safety net for direct
+ * checkDomains callers. */
+const MAX_PATH_PROBES_PER_HOST = FILTER_PROBES_PER_HOST;
 
 /**
  * Check serving URLs with bounded concurrency.
@@ -95,6 +137,7 @@ export async function checkDomains(
 ): Promise<{ results: DomainFilterResult[]; sampled: boolean }> {
   const { pathAware, hostOnly } = defs();
   let sampledAny = false;
+  resetEngineBreakers(); // breakers are per-run: a fresh check gets fresh engines
 
   // ── Plan the work: unique hosts + per-host sampled path targets ───────────
   const hostTargets = new Map<string, string>(); // host → probe key

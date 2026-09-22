@@ -19,6 +19,7 @@ import {
 import type { DomainFilterResult } from "../filter-apis/registry";
 import { FILTERS } from "../filter-apis/registry";
 import {
+  FilterDone,
   GenProgressPayload,
   RunSummary,
   TablePage,
@@ -119,6 +120,7 @@ export default function Generator() {
   const [filterSampled, setFilterSampled] = useState(false);
   const [unblockedCounts, setUnblockedCounts] = useState<Record<string, number> | null>(null);
   const [unverifiedCounts, setUnverifiedCounts] = useState<Record<string, number> | null>(null);
+  const [hostCoverage, setHostCoverage] = useState<FilterDone["hostCoverage"] | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
 
   const [pkgVersions, setPkgVersions] = useState<PackageVersion[] | null>(null);
@@ -337,6 +339,7 @@ export default function Generator() {
     setFilterProgress(null);
     setFilterResults(null);
     setUnblockedCounts(null);
+    setHostCoverage(null);
     setFilterError(null);
     setLinksOpen(false);
     setTableRows([]);
@@ -421,6 +424,7 @@ export default function Generator() {
       setFilterSampled(res.sampled === true);
       setUnblockedCounts(res.unblockedCounts);
       setUnverifiedCounts(res.unverifiedCounts ?? null);
+      setHostCoverage(res.hostCoverage ?? null);
       setSummary((s) => (s ? { ...s, filterSafeCount: res.filterSafeCount } : s));
     } catch (err) {
       setFilterError(err instanceof Error ? err.message : String(err));
@@ -1212,8 +1216,9 @@ export default function Generator() {
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                             Filter Checker — {filterResults.length.toLocaleString()} serving URL{filterResults.length === 1 ? "" : "s"} probed
-                            {filterSampled && " (large run: paths sampled per host — host verdicts cover every link)"}
-                          </p>                            <span
+                            {filterSampled && " (path coverage sampled per host — see breakdown below)"}
+                          </p>
+                          <span
                               className={`chip font-mono text-[11px] ${
                                 totalUrls - (summary.filterSafeCount ?? 0) > 0
                                   ? "border-warn/40 text-warn"
@@ -1233,6 +1238,39 @@ export default function Generator() {
                               — those links are NOT counted as unblocked.
                             </p>
                           )}
+                        {hostCoverage && hostCoverage.length > 0 && (
+                          <div className="mt-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                              Path coverage per serving host
+                            </p>
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {hostCoverage.slice(0, 18).map((h) => {
+                                const full = h.distinctPaths <= h.probed;
+                                return (
+                                  <span
+                                    key={h.host}
+                                    className={`chip font-mono text-[11px] ${
+                                      full
+                                        ? "border-accent/40 text-accent-soft"
+                                        : "border-ink-500 text-slate-400"
+                                    }`}
+                                    title={`${h.probed.toLocaleString()} of ${h.distinctPaths.toLocaleString()} distinct serving paths probed on ${h.host} — ${h.urls.toLocaleString()} links behind this host. Host-level engines verdict every link here; path-aware engines are verified on probed paths only.`}
+                                  >
+                                    {h.host}: {h.probed}/{h.distinctPaths.toLocaleString()}
+                                  </span>
+                                );
+                              })}
+                              {hostCoverage.length > 18 && (
+                                <span className="text-[11px] text-slate-500">+{hostCoverage.length - 18} more hosts</span>
+                              )}
+                            </div>
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              Host-level engines (Lightspeed, DNS resolvers, Deledao, Barracuda) verdict every link on
+                              the host; path-aware engines are verified on each probed path — unprobed paths stay
+                              unverified, never guessed.
+                            </p>
+                          </div>
+                        )}
                         <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                           {filterResults.slice(0, FILTER_CARDS_MAX).map((r) => (
                             <div

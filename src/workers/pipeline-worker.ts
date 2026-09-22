@@ -41,6 +41,9 @@ interface FilterState {
   /** Probe keys flagged by the aggregate verdict — the SMALL set used for
    * scoped "safe" iteration and table statuses. */
   blockedKeys: Set<string>;
+  /** Serving hosts whose HOST-level verdict is blocked — every URL behind
+   * them is blocked too, even keys that were never probed. */
+  blockedHosts: Set<string>;
   filterSafeCount: number;
   filterSampled: boolean;
 }
@@ -58,7 +61,7 @@ const state: {
   uniqueSvgCount: 0,
   validSet: new Set(),
   brokenSet: new Set(),
-  filter: { plan: null, byKey: new Map(), blockedKeys: new Set(), filterSafeCount: 0, filterSampled: false },
+  filter: { plan: null, byKey: new Map(), blockedKeys: new Set(), blockedHosts: new Set(), filterSafeCount: 0, filterSampled: false },
 };
 
 let abortFlag = false;
@@ -84,7 +87,7 @@ function resetForNewRun(): void {
   state.uniqueSvgCount = 0;
   state.validSet = new Set();
   state.brokenSet = new Set();
-  state.filter = { plan: null, byKey: new Map(), blockedKeys: new Set(), filterSafeCount: 0, filterSampled: false };
+  state.filter = { plan: null, byKey: new Map(), blockedKeys: new Set(), blockedHosts: new Set(), filterSafeCount: 0, filterSampled: false };
 }
 
 /** Scheme-stripped probe key — matches the runner's targetKeyOf for our URLs
@@ -95,7 +98,12 @@ function keyOf(url: string): string {
 
 function inScope(url: string, scope: string): boolean {
   if (scope === "valid") return state.validSet.has(url);
-  if (scope === "safe") return !state.filter.blockedKeys.has(keyOf(url));
+  if (scope === "safe") {
+    const key = keyOf(url);
+    // Blocked probe key OR a blocked serving HOST — a host-keyed engine's
+    // verdict covers every URL behind that host, probed paths or not.
+    return !state.filter.blockedKeys.has(key) && !state.filter.blockedHosts.has(keyOfTargetDomain(key));
+  }
   return true;
 }
 
@@ -273,7 +281,10 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
     state.filter.filterSampled = plan.sampled;
 
     // ── Arithmetic counting (see countFilterVerdicts) — O(plan × filters),
-    // the full dataset is never walked.
+    // the full dataset is never walked. Verdict inheritance is per engine
+    // class: host-keyed engines cover every URL on their host; path-aware
+    // engines are only VERIFIED on sampled distinct paths, and the rest
+    // surfaces as unverified — never as a borrowed "unblocked".
     const counts = countFilterVerdicts(
       set,
       plan,
@@ -281,16 +292,18 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
       FILTER_DEFS.map((f) => f.name),
     );
     state.filter.blockedKeys = counts.blockedKeys;
+    state.filter.blockedHosts = counts.blockedHosts;
     state.filter.filterSafeCount = counts.safeCount;
-    // Honest per-filter numbers: "unblocked" is URLs this filter actually
-    // ANSWERED and did not block. Verdicts it never produced (timeout,
-    // endpoint down, socket blocked) surface separately as unverified so a
-    // dead engine can no longer pad its unblocked total.
+    // Honest per-filter numbers, exact by construction:
+    //   unblocked + blocked + unverified = totalUrls (per filter).
     const unblockedCounts: Record<string, number> = {};
     const unverifiedCounts: Record<string, number> = {};
     for (const f of FILTER_DEFS) {
-      unblockedCounts[f.name] = Math.max(0, state.totalUrls - counts.perFilterBlocked[f.name] - counts.perFilterErrors[f.name]);
       unverifiedCounts[f.name] = counts.perFilterErrors[f.name];
+      unblockedCounts[f.name] = Math.max(
+        0,
+        state.totalUrls - counts.perFilterBlocked[f.name] - unverifiedCounts[f.name],
+      );
     }
 
     // UI card list — small (one entry per probed target).
@@ -302,6 +315,7 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
         filterSafeCount: state.filter.filterSafeCount,
         unblockedCounts,
         unverifiedCounts,
+        hostCoverage: counts.hostCoverage,
         sampled: plan.sampled,
       },
     });
@@ -310,15 +324,17 @@ async function runFilters(msg: { gen: number; concurrency: number }): Promise<vo
   }
 }
 
-/** Host part of a probe key ("cdn.jsdelivr.net/gh/..." → "cdn.jsdelivr.net"). */
+/** Host part of a probe key ("cdn.jsdelivr.net/gh/..." → "cdn.jsdelivr.net").
+ * A bare host (no slash) is its own host. */
 function keyOfTargetDomain(key: string): string {
-  return key.slice(0, key.indexOf("/")) || key;
+  const i = key.indexOf("/");
+  return i === -1 ? key : key.slice(0, i);
 }
-void keyOfTargetDomain;
 
 function statusOf(url: string, validateOn: boolean): "ok" | "bad" | "blocked" | "pending" | "off" {
   if (state.brokenSet.has(url)) return "bad";
-  if (state.filter.blockedKeys.has(keyOf(url))) return "blocked";
+  const key = keyOf(url);
+  if (state.filter.blockedKeys.has(key) || state.filter.blockedHosts.has(keyOfTargetDomain(key))) return "blocked";
   if (state.validSet.has(url)) return "ok";
   return validateOn ? "pending" : "off";
 }

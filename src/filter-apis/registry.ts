@@ -125,6 +125,21 @@ function asText(x: unknown): string {
 
 const isErr = (x: unknown) => x === "Error" || x == null;
 
+/** Engines whose endpoints see full URLs (host + path) — they can produce a
+ * DIFFERENT verdict for "cdn.jsdelivr.net/gh/u/r@sha" than for the bare host.
+ * The batch runner probes them per distinct host+path; every other engine is
+ * host-keyed (its verdict covers the whole host) and is probed once per host.
+ * This is the single source of truth — the runner and the counting logic
+ * both import it, so they can never drift apart. */
+export const PATH_AWARE_FILTERS: ReadonlySet<string> = new Set([
+  "FortiGuard",
+  "Blocksi Web",
+  "Blocksi AI",
+  "Linewize",
+  "Senso Cloud",
+  "Sophos",
+]);
+
 // Sophos allow-list: only clearly work/school-safe categories pass.
 const SOPHOS_ALLOWED_PROD = new Set([
   0, 6, 7, 8, 10, 13, 16, 20, 23, 25, 29, 39, 41, 42, 55, 57, 61, 62, 64, 68,

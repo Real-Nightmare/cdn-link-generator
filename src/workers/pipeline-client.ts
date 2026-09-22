@@ -42,8 +42,13 @@ export interface FilterDone {
    * endpoint down, socket blocked) — shown separately, never folded into
    * "unblocked". */
   unverifiedCounts?: Record<string, number>;
-  /** Path probes were reservoir-sampled (huge runs); host-level verdicts
-   * still cover every URL. */
+  /** Per-serving-host probe coverage: links behind the host, DISTINCT paths
+   * it serves, and how many of those paths were actually probed. Host-keyed
+   * engines (Lightspeed, DNS, Deledao, Barracuda) verdict every link on the
+   * host; path-aware engines are verified only on probed paths. */
+  hostCoverage?: { host: string; urls: number; distinctPaths: number; probed: number }[];
+  /** True when a host serves more distinct paths than its probe budget —
+   * path-aware verdicts on unprobed paths stay unverified (never guessed). */
   sampled?: boolean;
 }
 
