@@ -2,7 +2,7 @@
 
 Turn any GitHub repository's SVG files into ready-to-ship, commit-pinned CDN links — entirely in your browser.
 
-This is the web successor to the **cdn-link-generator** CLI (still available in the git history). Same proven pipeline — one Trees API call to scan the whole repo, real commit SHAs from history, links across 24 CDN providers, parallel validation — now with zero installation: open the site, paste a repo, copy links.
+This is the web successor to the **cdn-link-generator** CLI (still available in the git history). Same proven pipeline — one Trees API call to scan the whole repo, real commit SHAs from history, links across 25 CDN providers **plus your own BYOD IPs/hosts**, parallel validation — now with zero installation: open the site, paste a repo, copy links.
 
 Also supports **npm package mode**: load a package like `bootstrap-icons`, and every SVG in every published version becomes unpkg + jsDelivr links.
 
@@ -24,7 +24,7 @@ The **Seeder** page writes to your repos straight from the browser (token needs 
 - **SVG Cloner** — scan any repo for its `.svg` files, tick the ones you want, and clone them into the target repo in one batched commit. If the token can't push to the source repo (a different account), the cloner **forks it to your account first** and clones from the fork — Git's content-addressed blobs make the copy free.
 - **Artificial commits** — forge 1–**50** real commits that alternate adding and removing a tiny marker file under `.autogen/` (customizable base name, and they can target a new or existing branch), creating genuine history and SHAs that every CDN link can point at. Auto-commit mode keeps forging on a timer (1–60s) until you stop it or the cap is hit. One-click purge removes everything the feature created.
 
-### Supported providers (24)
+### Supported providers (25 + BYOD)
 
 Every URL format is live-tested against a real commit / package before shipping.
 
@@ -42,9 +42,19 @@ Every URL format is live-tested against a real commit / package before shipping.
 | 23–24 | gh.llkk.cc, ghfast.top | Optional proxy wrappers |
 | 21 | `{owner}.github.io` | Optional — requires a Pages site |
 | 22 | Bunny CDN (`{zone}.b-cdn.net`) | Optional — your own pull zone mirroring raw.githubusercontent.com; set the zone in Link Studio |
+| 25 | BYOD IPs | Optional — your own IPs/hosts, one extra link per host (see below) |
 | 16 | esm.sh | ESM CDN |
 | 19 | unpkg.com | Optional — npm package mode |
 | 20 | jsDelivr npm | Optional — npm package mode |
+
+### BYOD IPs — bring your own serving hosts
+
+Select the **BYOD IPs** provider and a textarea appears under the CDN list. Paste up to **256** of your own IPs or hosts — IPv4 (`203.0.113.7`), IPv6 in brackets (`[2001:db8::1]`), hostnames (`mirror.example.com`), optional ports (`10.0.0.14:8080`). Newlines, commas or spaces separate entries; `#` starts a comment; duplicates and junk are dropped automatically. Every valid host becomes its own extra serving slot, so **every asset × commit gains one more link per host** — at the same few-MB LinkSet cost (each slot is a ~100-byte prefix template, never a materialized URL).
+
+- Link shape: `https://host/owner/repo/sha/path.svg` (mirror-style path, like Githack) — point the host at your repo origin, or any server that reflects the path. Bare ports serve `http://`, everything else `https://`.
+- **Filter Checker aware**: each BYOD IP is its own serving host in the probe plan — host-level engines verdict that IP's links alone, path-aware engines probe the IP's distinct paths, and a blocked IP flags only its own links (never the CDNs').
+- Everything downstream just works: scope counts, validation, table, copy, txt/CSV/JSON/ZIP exports (each IP even gets its own `.txt` in the ZIP), and Gofile offload.
+- BYOD hosts apply in **repo mode**; npm mode keeps its package CDNs. The list persists in localStorage with your other settings.
 
 ## Privacy
 

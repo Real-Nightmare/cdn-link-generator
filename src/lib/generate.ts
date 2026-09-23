@@ -6,7 +6,7 @@
 // That makes generation O(tree fetches + integer bookkeeping) and lets a
 // low-end device hold 45M links in a few MB.
 
-import { selectCDNs, bunnyReady } from "./cdns";
+import { byodSlots, selectCDNs, bunnyReady } from "./cdns";
 import { GitHubRepo, getCommitSHAsWithTrees, getPackageSVGs, getSVGFiles, getTreeForCommit } from "./github";
 import { DEFAULT_URL_BUDGET } from "./settings";
 import { LinkSet, LinkSlot, LinkSource, SlotVariant } from "./linkset";
@@ -17,6 +17,9 @@ export interface GenOptions {
   cdnSelection: string[]; // empty = all providers
   /** Max flat URLs before commit history is sampled. Defaults to the settings default. */
   urlBudget?: number;
+  /** BYOD: user-supplied IPs/hosts (repo mode). Each host becomes one extra
+   * serving-host slot — every asset path gains a link per host. */
+  byodHosts?: string[];
 }
 
 export interface GenProgress {
@@ -63,14 +66,15 @@ export function sampleCommits(
 }
 
 /** Repo-mode slots: npm-only providers can't build repo links. */
-function repoSlots(selection: string[], bunnyZone: string | undefined): LinkSlot[] {
+function repoSlots(selection: string[], bunnyZone: string | undefined, byodHosts: string[]): LinkSlot[] {
   return selectCDNs(selection)
     .filter((p) => p.format !== "npm" && p.format !== "npmunpkg")
     .map((provider) => ({
       provider,
       variant: (provider.format === "pages" ? "pages" : "ref") as SlotVariant,
     }))
-    .filter((s) => s.provider.format !== "bunny" || !!bunnyZone);
+    .filter((s) => s.provider.format !== "bunny" || !!bunnyZone)
+    .concat(byodSlots(byodHosts));
 }
 
 /** npm-mode slots: only npm-capable providers, one slot each. */
@@ -106,7 +110,7 @@ export async function generateLinks(
   bunnyZoneName?: string,
 ): Promise<GenResult> {
   const bunny = bunnyReady() ? bunnyZoneName : undefined;
-  const slots = repoSlots(opts.cdnSelection, bunny);
+  const slots = repoSlots(opts.cdnSelection, bunny, opts.byodHosts ?? []);
   const result: GenResult = {
     repos: [],
     truncated: false,

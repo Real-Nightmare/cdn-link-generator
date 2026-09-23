@@ -14,7 +14,7 @@
 // ~2 GB of URL strings to a few MB of paths + SHAs, and generation becomes
 // pure integer bookkeeping on top of the tree fetches.
 
-import { CDNProvider } from "./cdns";
+import { CDNProvider, byodScheme, isByodHost } from "./cdns";
 import { PATH_AWARE_FILTERS } from "../filter-apis/registry";
 
 /** "ref" URLs embed the commit/version before the path; "pages" URLs do not
@@ -95,6 +95,13 @@ export function slotPrefix(slot: LinkSlot, src: LinkSource, ref: string, bunnyZo
       const zone = (bunnyZone || "").replace(/[^a-z0-9-]/g, "");
       if (!zone) return ""; // no zone configured — slots like this are never created
       return `https://${zone}.b-cdn.net/https://raw.githubusercontent.com/${src.owner}/${src.name}/${ref}/`;
+    }
+    case "byod": {
+      // User's own host serving the mirror-style path. Scheme rides on the
+      // host (http when a non-443 port is present, https otherwise). Same
+      // shape as the repo slotPrefix in cdns.ts generateCDNLink byte-for-byte.
+      if (!src.name) return ""; // npm-mode sources have no repo path — skip
+      return `${byodScheme(p.domain)}://${p.domain}/${src.owner}/${src.name}/${ref}/`;
     }
     case "gh": // jsDelivr style
       return `https://${p.domain}/gh/${src.owner}/${src.name}@${ref}/`;
@@ -234,6 +241,12 @@ function servingHost(slot: LinkSlot, src: LinkSource, bunnyZone?: string): strin
     const zone = (bunnyZone || "").replace(/[^a-z0-9-]/g, "");
     return zone ? `${zone}.b-cdn.net` : "";
   }
+  if (slot.provider.format === "byod") {
+    // Each BYOD host is its own serving host (and its own filter-scoping
+    // unit — a host-keyed block on one IP flags only that IP's links).
+    // Port stays part of the host so :80 variants are scoped separately.
+    return isByodHost(slot.provider.domain) ? slot.provider.domain : "";
+  }
   return slot.provider.domain;
 }
 
@@ -295,7 +308,10 @@ export function buildFilterPlan(set: LinkSet, maxPerHostArg?: number): FilterPla
   // sharing that exact key (1 for ref-variant URLs; ref-count for pages).
   // Returns false for duplicates so the caller's walk can continue cheaply.
   const takeKey = (url: string, mult: number, host: string): boolean => {
-    const key = url.slice(8); // strip "https://" — matches the runner's probe key
+    // Scheme-stripped probe key — BYOD links may be http:// (bare ports), so
+    // never assume "https://" (a hard slice(8) corrupts those keys and a
+    // blocked port host would stop matching its own links).
+    const key = url.slice(url.indexOf("://") + 3); // matches the runner's probe key
     if (multByKey.has(key)) return false;
     multByKey.set(key, mult);
     hostProbed.set(host, (hostProbed.get(host) ?? 0) + 1);

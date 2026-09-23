@@ -5,6 +5,10 @@ import {
   applyPreset,
   bunnyReady,
   setBunnyZone,
+  hasByodProvider,
+  parseByodHosts,
+  BYOD_MAX_HOSTS,
+  BYOD_PROVIDER_REF,
   CDN_PRESETS,
 } from "../lib/cdns";
 import {
@@ -104,6 +108,7 @@ export default function Generator() {
   const [concurrency, setConcurrency] = useState(initial.concurrency);
   const [downloadScope, setDownloadScope] = useState<DownloadScope>(initial.downloadScope);
   const [bunnyZoneInput, setBunnyZoneInput] = useState(initial.bunnyZone);
+  const [byodTextInput, setByodTextInput] = useState(initial.byodHosts);
   const [urlBudget, setUrlBudget] = useState(initial.urlBudget);
   const [token, setToken] = useState(initial.token);
 
@@ -173,12 +178,16 @@ export default function Generator() {
     [selectedCDNs],
   );
   // Providers actually used for the current mode.
+  // BYOD IPs — parsed once per edit; every valid host becomes an extra slot.
+  const byodHostList = useMemo(() => parseByodHosts(byodTextInput), [byodTextInput]);
   const activeProviders = useMemo(
     () =>
       mode === "npm"
         ? selectedProviders.filter((c) => c.format === "npm" || c.format === "npmunpkg")
-        : selectedProviders.filter((c) => c.format !== "npm" && c.format !== "npmunpkg"),
-    [selectedProviders, mode],
+        : selectedProviders.filter((c) => c.format !== "npm" && c.format !== "npmunpkg").concat(
+            byodHostList.length > 0 && hasByodProvider(selectedProviders) ? [BYOD_PROVIDER_REF] : [],
+          ),
+    [selectedProviders, mode, byodHostList],
   );
   const busy =
     runState === "running" || valProgress !== null || filterBusy || filterProgress !== null;
@@ -223,10 +232,11 @@ export default function Generator() {
       lastPreset: preset?.id ?? "custom",
       downloadScope,
       bunnyZone: bunnyZoneInput,
+      byodHosts: byodTextInput,
       urlBudget,
     };
     saveSettings(settings);
-  }, [token, commitsPerSVG, selectedCDNs, concurrency, validate, npmPkg, downloadScope, bunnyZoneInput, urlBudget, initial.lastRepos]);
+  }, [token, commitsPerSVG, selectedCDNs, concurrency, validate, npmPkg, downloadScope, bunnyZoneInput, byodTextInput, urlBudget, initial.lastRepos]);
 
   // Watchdog: if no progress event fires for 3 minutes mid-run, surface a
   // "still working" card instead of a silent black screen.
@@ -370,6 +380,7 @@ export default function Generator() {
         cdnSelection: selectedCDNs.map(String),
         token: token.trim(),
         bunnyZone: bunnyReady() ? bunnyZoneInput.trim() : "",
+        byodHosts: mode === "repo" ? byodTextInput : "",
         urlBudget,
         onProgress: setProgress,
       });
@@ -391,6 +402,7 @@ export default function Generator() {
           lastPreset: "custom",
           downloadScope,
           bunnyZone: bunnyZoneInput,
+          byodHosts: byodTextInput,
           urlBudget,
         });
       }
@@ -896,6 +908,44 @@ export default function Generator() {
                 <span className="font-mono text-slate-400"> raw.githubusercontent.com</span> (URL Host header
                 routing on), then enter its name here. Links: <span className="font-mono">https://zone.b-cdn.net/raw.githubusercontent.com/owner/repo/sha/path</span>
               </p>
+            </div>
+          )}
+
+          {/* BYOD IPs — user-supplied serving hosts, one extra link each */}
+          {hasByodProvider(selectedProviders) && (
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-slate-200">
+                BYOD IPs <span className="text-slate-500">(your own serving hosts — max {BYOD_MAX_HOSTS})</span>
+              </label>
+              <textarea
+                value={byodTextInput}
+                onChange={(e) => setByodTextInput(e.target.value.slice(0, 16_000))}
+                rows={3}
+                spellCheck={false}
+                placeholder={"203.0.113.7\n10.0.0.14:8080\n[2001:db8::1]\nmirror.example.com   # comments allowed"}
+                className="input-base resize-y font-mono text-xs"
+              />
+              {byodHostList.length > 0 ? (
+                <p className="mt-1.5 text-[11px] text-accent">
+                  ✓ {byodHostList.length} host{byodHostList.length === 1 ? "" : "s"} — {mode === "repo"
+                    ? `+${byodHostList.length.toLocaleString()} link${byodHostList.length === 1 ? "" : "s"} per asset×commit (http on bare ports, https otherwise)`
+                    : "npm mode serves npm CDNs — BYOD is repo-mode only"}
+                </p>
+              ) : (
+                <p className="mt-1.5 text-[11px] text-slate-500">
+                  One per line (or comma/space separated) — IPv4, IPv6 in [brackets], hostnames, optional :port.
+                  # comments ignored. Each host serves the mirror path /owner/repo/sha/file.svg — point it at your repo or any
+                  path-reflecting origin.
+                </p>
+              )}
+              {byodTextInput.trim().length > 0 && byodHostList.length === 0 && (
+                <p className="mt-1 text-[11px] text-warn">No valid hosts found in that list.</p>
+              )}
+              {byodTextInput.trim().length > 0 &&
+                byodHostList.length > 0 &&
+                byodTextInput.trim().split(/[\n,;\s]+/).filter((t) => t.trim() && !t.trim().startsWith("#")).length > byodHostList.length && (
+                  <p className="mt-1 text-[11px] text-warn">Some lines were ignored (invalid or duplicate hosts).</p>
+                )}
             </div>
           )}
 

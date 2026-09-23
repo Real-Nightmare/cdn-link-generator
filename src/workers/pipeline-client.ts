@@ -181,6 +181,8 @@ export const pipeline = {
     cdnSelection: string[];
     token: string;
     bunnyZone: string;
+    /** Raw BYOD host list (repo mode) — each host becomes extra link slots. */
+    byodHosts?: string;
     /** Max URL objects the worker may hold (commit sampling threshold). */
     urlBudget: number;
     onProgress: (p: GenProgressPayload) => void;

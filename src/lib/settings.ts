@@ -27,6 +27,9 @@ export interface AppSettings {
   downloadScope: DownloadScope;
   /** Bunny CDN pull zone name (b-cdn.net subdomain), empty when unused. */
   bunnyZone: string;
+  /** BYOD IPs/hosts (raw textarea text, newline/comma separated). Each parsed
+   * host becomes an extra serving-host slot — more links per asset. */
+  byodHosts: string;
   /** Max URL objects the worker may hold during repo-mode generation.
    * Above it, commit history is sampled (newest always kept). */
   urlBudget: number;
@@ -46,6 +49,7 @@ export function defaultSettings(): AppSettings {
     lastPreset: "standard",
     downloadScope: "all",
     bunnyZone: "",
+    byodHosts: "",
     urlBudget: DEFAULT_URL_BUDGET,
   };
 }
@@ -76,6 +80,7 @@ export function loadSettings(): AppSettings {
           ? stored.downloadScope
           : "all",
       bunnyZone: typeof stored.bunnyZone === "string" ? stored.bunnyZone : "",
+      byodHosts: typeof stored.byodHosts === "string" ? stored.byodHosts.slice(0, 16_000) : "",
       urlBudget:
         typeof stored.urlBudget === "number" && stored.urlBudget >= MIN_URL_BUDGET
           ? Math.min(Math.floor(stored.urlBudget), MAX_URL_BUDGET_CLAMP)

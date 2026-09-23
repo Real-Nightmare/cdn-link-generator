@@ -1,6 +1,8 @@
 // CDN provider registry — every URL format below was live-tested (HTTP 200 +
 // image/svg+xml) against a real GitHub commit and npm package.
 
+import type { LinkSlot } from "./linkset";
+
 export type CDNFormat =
   | "gh" // /gh/{owner}/{repo}@{sha}/{path} — jsDelivr & mirrors
   | "static" // /gh/{owner}/{repo}/{sha}/{path} — StaticDelivr (no @ — live-tested)
@@ -12,7 +14,8 @@ export type CDNFormat =
   | "npm" // /npm/{package}/{path} — jsDelivr npm
   | "npmunpkg" // /{package}/{path} — unpkg
   | "pages" // https://{owner}.github.io/{repo}/{path}
-  | "bunny"; // https://{zone}.b-cdn.net/{path} — needs a Bunny pull zone
+  | "bunny" // https://{zone}.b-cdn.net/{path} — needs a Bunny pull zone
+  | "byod"; // https://{host}/{owner}/{repo}/{sha}/{path} — user's own IP/host (one slot each)
 
 export type CDNCategory = "jsdelivr" | "proxy" | "esm" | "npm";
 
@@ -148,6 +151,17 @@ export const CDN_PROVIDERS: CDNProvider[] = [
     requiresOwnHost: true,
     note: "Your Bunny pull zone backed by the repo — add the zone name in Settings",
   },
+  {
+    id: 25,
+    name: "BYOD IPs",
+    domain: "your IPs",
+    format: "byod",
+    svgOnly: false,
+    category: "proxy",
+    optional: true,
+    requiresOwnHost: true,
+    note: "Your own IPs/hosts (one link per host) — add them under the CDN list",
+  },
 ];
 
 export const CATEGORY_LABELS: Record<CDNCategory, string> = {
@@ -260,9 +274,97 @@ export function generateCDNLink(
       if (!zone) return ""; // no zone configured — caller filters empties out
       return `https://${zone}.b-cdn.net/${raw}`;
     }
+    case "byod": {
+      // BYOD host: one synthetic provider per user host — domain IS the host,
+      // scheme (http/https) rides on it. Plain mirror-style path form.
+      const host = provider.domain;
+      if (!isByodHost(host)) return ""; // malformed host — caller filters empties out
+      return `${byodScheme(host)}://${host}/${owner}/${repo}/${sha}/${p}`;
+    }
     default: // gh — jsDelivr style: /gh/owner/repo@commit/path
       return `https://${provider.domain}/gh/${owner}/${repo}@${sha}/${p}`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// BYOD IPs — bring-your-own serving hosts (servers, edge IPs, school LAN
+// mirrors, anything that answers GETs). Parsed into normalized hosts; every
+// host becomes ONE synthetic CDN provider (format "byod", domain = the host)
+// so it flows through LinkSet slots like any other provider — counts, scopes,
+// exports, the browse table and the Filter Checker all treat each host as its
+// own serving host with zero special-casing downstream.
+
+/** Max BYOD hosts in one run — 256 IPs × a big dataset is already tens of
+ * millions of extra links; a hard clamp keeps the UI honest. */
+export const BYOD_MAX_HOSTS = 256;
+
+/** Hostname (letters/digits/hyphens/dots) or bracketed IPv6; ports allowed. */
+export function isByodHost(raw: string): boolean {
+  const s = raw.trim();
+  if (!s || s.length > 253 + 6) return false;
+  if (s.startsWith("[")) {
+    // [::1] or [::1]:8080
+    const end = s.indexOf("]");
+    if (end === -1 || end < 4) return false;
+    const ip = s.slice(1, end);
+    const rest = s.slice(end + 1);
+    if (rest !== "" && !/^:\d{1,5}$/.test(rest)) return false;
+    return /^[:0-9a-fA-F.]+$/.test(ip) && ip.includes(":");
+  }
+  // IPv4:port or hostname:port
+  const [host, port] = s.includes(":") ? [s.slice(0, s.indexOf(":")), s.slice(s.indexOf(":") + 1)] : [s, ""];
+  if (port !== "" && !/^\d{1,5}$/.test(port)) return false;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    return host.split(".").every((o) => Number(o) <= 255);
+  }
+  return /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/.test(host);
+}
+
+/** http on a bare port, https otherwise (Bunny's https-mirror model). */
+export function byodScheme(host: string): "http" | "https" {
+  const m = host.match(/:(\d+)$/);
+  return m && m[1] !== "443" ? "http" : "https";
+}
+
+/** Parse a free-form blob (newlines/commas/semicolons/spaces; optional
+ * scheme prefixes; `#` starts a comment to end of LINE) into unique hosts.
+ * "as much support as possible" — sloppy pasting still lands in the set. */
+export function parseByodHosts(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    // Cut the comment first — otherwise words after `#` parse as hosts.
+    const hash = rawLine.indexOf("#");
+    const line = hash === -1 ? rawLine : rawLine.slice(0, hash);
+    for (const rawTok of line.split(/[,;\s]+/)) {
+      let s = rawTok.trim();
+      if (!s) continue;
+      s = s.replace(/^https?:\/\//i, "");
+      s = s.split("/")[0];
+      s = s.replace(/[^\w.:\[\]-]/g, ""); // strip labels/junk around the token
+      if (!s || !isByodHost(s)) continue;
+      const lower = s.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      out.push(s);
+      if (out.length >= BYOD_MAX_HOSTS) break;
+    }
+    if (out.length >= BYOD_MAX_HOSTS) break;
+  }
+  return out;
+}
+
+/** One synthetic provider per host; stable ids 9_000_001+. */
+export function byodProviders(hosts: string[]): CDNProvider[] {
+  return hosts.slice(0, BYOD_MAX_HOSTS).map((host, i) => ({
+    id: 9_000_001 + i,
+    name: `BYOD ${host}`,
+    domain: host,
+    format: "byod" as const,
+    svgOnly: false,
+    category: "proxy" as const,
+    note: "Your own IP/host — mirror-style path",
+  }));
 }
 
 /** The user's Bunny pull zone (Settings → Bunny CDN). Empty = bunny disabled. */
@@ -301,5 +403,21 @@ export function selectCDNs(selection: string[]): CDNProvider[] {
 }
 
 export function findCDN(id: number): CDNProvider | undefined {
-  return CDN_PROVIDERS.find((c) => c.id === id);
+  return CDN_PROVIDERS.find((c) => c.id >= 9_000_000 ? undefined : c.id === id);
 }
+
+// ---------------------------------------------------------------------------
+// BYOD slot builder — consumed by generate.ts when assembling LinkSet slots.
+
+/** BYOD slot (variant "ref") for every parsed host. Empty when none. */
+export function byodSlots(hosts: string[]): LinkSlot[] {
+  return hosts.length === 0 ? [] : byodProviders(hosts).map((provider) => ({ provider, variant: "ref" as const }));
+}
+
+/** Whether the selection includes the BYOD entry (id 25). */
+export function hasByodProvider(sel: { id: number }[]): boolean {
+  return sel.some((c) => c.id === 25);
+}
+
+/** Static BYOD entry — for UI labels/lists only (slots use synthetic providers). */
+export const BYOD_PROVIDER_REF: CDNProvider = CDN_PROVIDERS.find((c) => c.id === 25)!;

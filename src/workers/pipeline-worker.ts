@@ -15,6 +15,7 @@ import {
   type ZipLazyEntry,
 } from "../lib/generate";
 import { validateLinks } from "../lib/github";
+import { parseByodHosts } from "../lib/cdns";
 import { checkDomains } from "../filter-apis/runner";
 import { FILTERS as FILTER_DEFS, PATH_AWARE_FILTERS, type DomainFilterResult } from "../filter-apis/registry";
 import {
@@ -92,9 +93,10 @@ function resetForNewRun(): void {
 }
 
 /** Scheme-stripped probe key — matches the runner's targetKeyOf for our URLs
- * (all https, never a trailing slash). One slice, no URL parsing. */
+ * (never a trailing slash). BYOD links may be http:// (bare ports), so the
+ * scheme is located instead of hard-slicing 8 chars. */
 function keyOf(url: string): string {
-  return url.slice(8);
+  return url.slice(url.indexOf("://") + 3);
 }
 
 function inScope(url: string, scope: string): boolean {
@@ -163,6 +165,8 @@ async function runGenerate(msg: {
   cdnSelection: string[];
   token: string;
   bunnyZone: string;
+  /** Raw BYOD host text — parsed into normalized hosts in generate.ts. */
+  byodHosts?: string;
   urlBudget?: number;
 }): Promise<void> {
   resetForNewRun();
@@ -174,6 +178,7 @@ async function runGenerate(msg: {
           commitsPerSVG: msg.commitsPerSVG,
           cdnSelection: msg.cdnSelection,
           urlBudget: msg.urlBudget,
+          byodHosts: parseByodHosts(msg.byodHosts || ""),
         },
         msg.token || undefined,
         postGenProgress,
