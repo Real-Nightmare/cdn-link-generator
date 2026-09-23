@@ -180,7 +180,10 @@ export async function checkDomains(
 
   const report = (force = false) => {
     const now = Date.now();
-    if (force || now - lastReport >= 120) {
+    // 250ms floor: each report is a postMessage + React state update + full
+    // filter-panel re-render. 120ms gave no UX benefit and doubled render
+    // churn on low-end devices mid-run.
+    if (force || now - lastReport >= 250) {
       lastReport = now;
       onProgress?.(done, total);
     }
@@ -195,7 +198,18 @@ export async function checkDomains(
       const idx = nextIndex++;
       const target = idx < hostPending.length ? hostPending[idx] : pathPending[idx - hostPending.length];
       const isHostProbe = idx < hostPending.length;
-      const results = await runSubset(isHostProbe ? hostOnly : pathAware, isHostProbe ? `https://${target}/` : `https://${target}`);
+      const probeUrl = isHostProbe ? `https://${target}/` : `https://${target}`;
+      const subset = isHostProbe ? hostOnly : pathAware;
+      let results = await runSubset(subset, probeUrl);
+      // One retry for targets whose ENTIRE subset errored — a cold pool racing
+      // every endpoint at once (TLS warm-up, DNS miss) used to harden a
+      // transient timeout into a cached error verdict for that engine on that
+      // host, silently zeroing its column. Retried only when NOTHING answered:
+      // an engine with a real verdict never re-pays a round trip, and a
+      // persistently dead endpoint still errors (fail closed) after 2 tries.
+      if (results.every((r) => r.error) && !shouldAbort?.()) {
+        results = await runSubset(subset, probeUrl);
+      }
       const next = summarize(target, results);
       const prev = cache.get(target);
       // Never let a transient ENGINE ERROR overwrite a known verdict on a bare

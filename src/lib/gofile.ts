@@ -16,7 +16,11 @@ const FALLBACK_SERVER = "store1";
  * download (big downloads stall the tab and giant ones crash it). 20MB per
  * user request — anything bigger becomes a shareable Gofile link. */
 let GOFILE_OFFLOAD_BYTES = 20 * 1024 * 1024;
-
+/** Link-count trigger: at/above this many links an export ALWAYS offloads,
+ * regardless of the byte estimate. Byte heuristics can undershoot (short
+ * URLs, JSON batching); a 2M+ link list is exactly the scale where local
+ * downloads stall/crash the tab, so it gets the share-link path outright. */
+const GOFILE_OFFLOAD_LINKS = 2_000_000;
 /** Test-only hook — lets functional tests exercise the offload path without
  * building a 100 MB+ dataset. Production code never calls this. */
 export function _setOffloadThresholdForTests(bytes: number): void {
@@ -115,14 +119,22 @@ export async function uploadToGofile(
 }
 
 /**
- * Offload decision for an export: returns true when the chunk-list size is
- * at/over the offload threshold. Checking the chunk list (before joining)
- * avoids ever materializing the payload twice.
+ * Offload decision for an export: true when the chunk-list size is at/over
+ * the byte threshold OR the caller counted ≥ GOFILE_OFFLOAD_LINKS links.
+ * Checking the chunk list (before joining) avoids ever materializing the
+ * payload twice.
  */
-export function shouldOffloadToGofile(chunks: string[] | null, byteLength: number): boolean {
+export function shouldOffloadToGofile(
+  chunks: string[] | null,
+  byteLength: number,
+  linkCount?: number,
+): boolean {
+  if (linkCount !== undefined && linkCount >= GOFILE_OFFLOAD_LINKS) return true;
   if (chunks) return chunkSize(chunks) >= GOFILE_OFFLOAD_BYTES;
   return byteLength >= GOFILE_OFFLOAD_BYTES;
 }
 
 /** Offload threshold in bytes — exports at/above this go to Gofile. */
 export const GOFILE_OFFLOAD_THRESHOLD = GOFILE_OFFLOAD_BYTES;
+/** Link-count trigger — exports of at/above this many links always offload. */
+export const GOFILE_OFFLOAD_LINK_COUNT = GOFILE_OFFLOAD_LINKS;

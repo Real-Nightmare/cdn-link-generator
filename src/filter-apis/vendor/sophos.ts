@@ -91,7 +91,11 @@ class ProtobufReader {
     if (wireType === 0) {
       this.readVarint();
     } else if (wireType === 2) {
-      this.pos += this.readVarint();
+      // Read the length FIRST: `this.pos += this.readVarint()` captured the old
+      // pos before readVarint advanced it, landing every skip one varint-byte
+      // short and corrupting the following tag read.
+      const len = this.readVarint();
+      this.pos += len;
     } else if (wireType === 1) {
       this.pos += 8;
     } else if (wireType === 5) {
@@ -146,13 +150,15 @@ function readURLResult(reader: ProtobufReader, end: number): SophosURLResult {
   };
   while (reader.pos < end) {
     const tag = reader.readTag();
-    if (tag.fieldNum === 1) result.status_code = reader.readVarint();
-    else if (tag.fieldNum === 2) {
-      const msgEnd = reader.pos + reader.readVarint();
+    if (tag.fieldNum === 1 && tag.wireType === 0) {
+      result.status_code = reader.readVarint();
+    } else if (tag.fieldNum === 2 && tag.wireType === 2) {
+      const len = reader.readVarint();
+      const msgEnd = reader.pos + len;
       result.category = readCategory(reader, msgEnd);
-    } else if (tag.fieldNum === 3) result.threat_name = reader.readString();
-    else if (tag.fieldNum === 4) result.labs_uri_id = reader.readVarint();
-    else if (tag.fieldNum === 6) result.ttl = reader.readVarint();
+    } else if (tag.fieldNum === 3 && tag.wireType === 2) result.threat_name = reader.readString();
+    else if (tag.fieldNum === 4 && tag.wireType === 0) result.labs_uri_id = reader.readVarint();
+    else if (tag.fieldNum === 6 && tag.wireType === 0) result.ttl = reader.readVarint();
     else reader.skip(tag.wireType);
   }
   return result;
@@ -162,8 +168,15 @@ function readLookupResponse(reader: ProtobufReader, end: number): { url_results:
   const lookup = { url_results: [] as SophosURLResult[] };
   while (reader.pos < end) {
     const tag = reader.readTag();
-    if (tag.fieldNum === 2) {
-      const msgEnd = reader.pos + reader.readVarint();
+    // Confirmed against the live SXL4 endpoint: the lookup response carries
+    // exactly ONE per-URL result under field 2 — f1 = varint status_code
+    // (1 = found), f2 = category msg, f4 = labs_uri_id, f6 = ttl. Field 4 at
+    // this level is a DOMAIN-results breakdown (host + per-domain subresults
+    // + tld info), NOT a URL result — parsing it as one yields garbage
+    // verdicts, so it is skipped like any other unknown field.
+    if (tag.fieldNum === 2 && tag.wireType === 2) {
+      const len = reader.readVarint();
+      const msgEnd = reader.pos + len;
       lookup.url_results.push(readURLResult(reader, msgEnd));
     } else {
       reader.skip(tag.wireType);
@@ -172,7 +185,8 @@ function readLookupResponse(reader: ProtobufReader, end: number): { url_results:
   return lookup;
 }
 
-function readSXL4Response(buf: Uint8Array): { id: number; lookup: { url_results: SophosURLResult[] } | null } {
+/** Exported for behavioral tests — not used by production callers. */
+export function readSXL4Response(buf: Uint8Array): { id: number; lookup: { url_results: SophosURLResult[] } | null } {
   const reader = new ProtobufReader(buf);
   const response = { id: 0, lookup: null as { url_results: SophosURLResult[] } | null };
 
@@ -180,7 +194,8 @@ function readSXL4Response(buf: Uint8Array): { id: number; lookup: { url_results:
     const tag = reader.readTag();
     if (tag.fieldNum === 1) response.id = reader.readVarint();
     else if (tag.fieldNum === 3) {
-      const msgEnd = reader.pos + reader.readVarint();
+      const len = reader.readVarint();
+      const msgEnd = reader.pos + len;
       response.lookup = readLookupResponse(reader, msgEnd);
     } else reader.skip(tag.wireType);
   }
@@ -262,7 +277,10 @@ export async function sophos(url: string): Promise<SophosResult> {
   const responseBuffer = new Uint8Array(await res.arrayBuffer());
 
   const response = readSXL4Response(responseBuffer);
-  const urlResponse = response.lookup?.url_results?.[0];
+  // The lookup response carries exactly one per-URL result under field 2
+  // (verified against the live endpoint); the domain breakdown under field 4
+  // is skipped by the parser and must never be read as a verdict.
+  const urlResponse = response.lookup?.url_results[0] ?? null;
 
   if (!urlResponse || !urlResponse.category) {
     return { found: false };

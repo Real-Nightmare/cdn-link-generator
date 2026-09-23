@@ -10,6 +10,7 @@ import { selectCDNs, bunnyReady } from "./cdns";
 import { GitHubRepo, getCommitSHAsWithTrees, getPackageSVGs, getSVGFiles, getTreeForCommit } from "./github";
 import { DEFAULT_URL_BUDGET } from "./settings";
 import { LinkSet, LinkSlot, LinkSource, SlotVariant } from "./linkset";
+import { BlobSpool } from "./export-builders";
 
 export interface GenOptions {
   commitsPerSVG: number; // 0 = all fetched commits (repo mode)
@@ -316,7 +317,13 @@ export interface ZipLazyEntry {
    * memory at a time — the builder CRCs + spools an entry to a Blob before
    * the next entry is built, so a 5-entry ZIP of 45M links never holds more
    * than one dataset copy. */
-  parts: () => Promise<(string | Uint8Array)[]>;
+  parts?: () => Promise<(string | Uint8Array)[]>;
+  /** Streaming alternative to `parts`: the builder passes an `add` callback
+   * and the entry pushes each part as it's produced. Every part is CRC'd and
+   * spooled into the entry's payload Blob IMMEDIATELY, so even ONE entry
+   * (e.g. the combined 45M-link .txt) never holds its full string set in
+   * heap — peak memory is one batch, not one entry. Preferred over `parts`. */
+  add?: (sink: (part: string | Uint8Array) => void) => Promise<void>;
 }
 
 /**
@@ -341,28 +348,32 @@ export async function buildZipLazy(entries: ZipLazyEntry[]): Promise<Blob> {
   }
   const prepared: Prep[] = [];
   for (const entry of entries) {
-    const parts = await entry.parts();
     let crc = 0 ^ -1;
     let size = 0;
-    const payloadParts: BlobPart[] = [];
-    for (const part of parts) {
-      if (typeof part === "string") {
-        const bytes = enc.encode(part);
-        crc = crcBytes(crc, bytes);
-        size += bytes.length;
-        payloadParts.push(asPart(bytes));
-      } else {
-        crc = crcBytes(crc, part);
-        size += part.length;
-        payloadParts.push(asPart(part));
-      }
+    const spool = new BlobSpool();
+    const sink = (part: string | Uint8Array): void => {
+      const bytes = typeof part === "string" ? enc.encode(part) : part;
+      crc = crcBytes(crc, bytes);
+      size += bytes.length;
+      spool.addBytes(bytes);
+    };
+    if (entry.add) {
+      // Streaming entry: every part is CRC'd + spooled the moment it arrives,
+      // so even a single 45M-link entry never holds its strings in heap —
+      // peak memory is one batch, not one entry.
+      await entry.add(sink);
+    } else if (entry.parts) {
+      const parts = await entry.parts();
+      for (const part of parts) sink(part);
+      parts.length = 0; // release the chunk list; the spooled Blob owns the bytes
+    } else {
+      throw new Error(`ZIP entry "${entry.name}" defines neither add nor parts`);
     }
-    parts.length = 0; // release the chunk list; the spooled Blob owns the bytes
     prepared.push({
       nameBytes: enc.encode(entry.name),
       crc: (crc ^ -1) >>> 0,
       size,
-      payload: new Blob(payloadParts),
+      payload: spool.finish(),
     });
   }
 

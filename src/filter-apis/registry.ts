@@ -44,20 +44,57 @@ const SENSO_CATS = sensoCats as unknown as Record<string, [string, boolean]>;
 /** Server proxy for filters whose endpoints send no CORS headers. */
 const FILTER_API = "/api/filter";
 
-/** Fallback relay for static previews where /api/filter doesn't exist. */
-async function relayText(url: string, timeoutMs = 20000): Promise<string> {
-  const res = await fetch(`https://r.jina.ai/${url}`, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`relay ${res.status}`);
-  return res.text();
+/** Fallback relay for static previews / hosts where /api/filter doesn't exist.
+ * r.jina.ai is GET-only, CORS-open and proved live against FortiGuard, Senso
+ * and Linewize (2026-09). AllOrigins is the second hop. The relay wraps the
+ * body in a "Markdown Content:" envelope — extractJson digs the payload out. */
+const RELAY_TIMEOUT_MS = 20000;
+async function relayText(url: string, timeoutMs = RELAY_TIMEOUT_MS): Promise<string> {
+  // Factories, not promises: only the attempt being awaited is ever started.
+  // The old eager array fired every relay request up front and left the losers
+  // as unobserved rejections — an unhandled-rejection crash risk in the
+  // worker and wasted requests on every single probe.
+  const attempts: Array<() => Promise<string>> = [
+    () =>
+      fetch(`https://r.jina.ai/${url}`, { signal: AbortSignal.timeout(timeoutMs) }).then(async (res) => {
+        if (!res.ok) throw new Error(`relay jina ${res.status}`);
+        return res.text();
+      }),
+    () =>
+      fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, {
+        signal: AbortSignal.timeout(timeoutMs),
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`relay allorigins ${res.status}`);
+        return res.text();
+      }),
+  ];
+  // First success wins — relays are interchangeable GET proxies here.
+  let lastErr: unknown;
+  for (const start of attempts) {
+    try {
+      return await start();
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("all relays failed");
 }
 
-async function relayJson<T>(url: string, timeoutMs = 20000): Promise<T> {
-  const text = await relayText(url, timeoutMs);
+/** The relay returns the raw payload — or a markdown envelope around it.
+ * Pull out the first JSON array/object whatever shape came back. */
+function extractJson(text: string): string {
   const obj = text.indexOf("{");
   const arr = text.indexOf("[");
   const idx = obj === -1 ? arr : arr === -1 ? obj : Math.min(obj, arr);
   if (idx === -1) throw new Error("relay returned no JSON");
-  return JSON.parse(text.slice(idx)) as T;
+  // Slice from the first bracket to the LAST matching close — jina sometimes
+  // appends nav junk after the payload.
+  const tail = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
+  return tail > idx ? text.slice(idx, tail + 1) : text.slice(idx);
+}
+
+async function relayJson<T>(url: string, timeoutMs = RELAY_TIMEOUT_MS): Promise<T> {
+  return JSON.parse(extractJson(await relayText(url, timeoutMs))) as T;
 }
 
 /**
@@ -70,10 +107,24 @@ async function serverCheck<T>(kind: string, url: string, allow404AsOff = false):
       signal: AbortSignal.timeout(25000),
     });
     if (res.ok) {
-      const j = (await res.json()) as { result?: T; error?: string };
-      if (j.error) throw new Error(j.error);
-      if (j.result !== undefined) return j.result;
-      throw new Error("empty api result");
+      // CRITICAL: when the Python API is absent the host answers /api/filter
+      // with the SPA's index.html at HTTP 200 (dev servers, static hosting).
+      // json() on that HTML throws SyntaxError which used to surface as a
+      // generic failure and never reached the relay below — every server
+      // engine showed 0 answers. Guard: a 200 without a JSON body goes to the
+      // relay exactly like a 404.
+      let j: { result?: T; error?: string } | null = null;
+      try {
+        j = (await res.json()) as { result?: T; error?: string };
+      } catch {
+        j = null; // SPA HTML — API not deployed on this host
+      }
+      if (j) {
+        if (j.error) throw new Error(j.error);
+        if (j.result !== undefined) return j.result;
+        throw new Error("empty api result");
+      }
+      return relayFallback(kind, url) as Promise<T>;
     }
     if (res.status < 500 && res.status !== 404) {
       const j = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -81,8 +132,8 @@ async function serverCheck<T>(kind: string, url: string, allow404AsOff = false):
     }
     throw new Error(`api ${res.status}`);
   } catch (err) {
-    // /api/filter absent (static preview) → fall back to the relay. The relay
-    // 404s on unknown hosts — treat that as "off" when the caller asked.
+    // /api/filter absent (static preview/dev host) → fall back to the relay.
+    // The relay 404s on unknown hosts — treat that as "off" when asked.
     if (err instanceof TypeError || /api (404|50[0-9])/.test(String((err as Error).message))) {
       if (allow404AsOff && /api 404/.test(String((err as Error).message))) {
         return { category: "", blocked: false } as T;

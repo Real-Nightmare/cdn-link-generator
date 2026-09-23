@@ -98,6 +98,8 @@ def check_linewize(full_url: str) -> Any:
 def check_barracuda(raw_target: str) -> Dict[str, Any]:
     # Accept either a bare hostname or a full URL; the form wants just the host.
     from urllib.parse import urlparse
+    import re
+    import http.cookiejar
     target = raw_target.strip()
     if "://" in target:
         target = urlparse(target).hostname or target
@@ -105,23 +107,38 @@ def check_barracuda(raw_target: str) -> Dict[str, Any]:
     form = urllib.parse.urlencode(
         {"lookup_entry": target, "submit": "Check Reputation"}
     ).encode()
-    html = _request(
-        "https://www.barracudacentral.org/lookups/lookup-reputation",
-        method="POST",
-        headers={
-            "content-type": "application/x-www-form-urlencoded",
-            # Barracuda rejects bot-ish UAs on this form — reuse the exact
-            # browser identity and referer the form itself sends.
-            "referer": "https://www.barracudacentral.org/lookups/lookup-reputation",
-            "origin": "https://www.barracudacentral.org",
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "accept-language": "en-US,en;q=0.9",
-        },
+    # Barracuda's form endpoint only answers with a browser-like UA + referer
+    # AND a session cookie from a prior GET of the same page (verified live
+    # 2026-09: POSTs without a session get a bare form page back, which the
+    # old code mis-parsed into "Barracuda parse failed"). Warm the session
+    # first with a cookie jar, then POST exactly like the form does.
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar),
+        urllib.request.HTTPSHandler(context=_INSECURE_CTX),
+    )
+    page_url = "https://www.barracudacentral.org/lookups/lookup-reputation"
+    browser_headers = {
+        "user-agent": _UA,
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+    }
+    warm = urllib.request.Request(page_url, headers=dict(browser_headers, referer=page_url))
+    opener.open(warm, timeout=TIMEOUT).read()
+    post = urllib.request.Request(
+        page_url,
         data=form,
-    ).decode("utf-8", "replace")
+        method="POST",
+        headers=dict(
+            browser_headers,
+            referer=page_url,
+            origin="https://www.barracudacentral.org",
+            **{"content-type": "application/x-www-form-urlencoded"},
+        ),
+    )
+    html = opener.open(post, timeout=TIMEOUT).read().decode("utf-8", "replace")
     if "does not exist in our WebFilter content database." in html:
         return {"category": "Uncategorized", "blocked": True}
-    import re
     m = re.search(r"was found under the following categories:\s*<strong>(.*?)</strong>", html)
     if not m:
         raise ValueError("barracuda parse failed")

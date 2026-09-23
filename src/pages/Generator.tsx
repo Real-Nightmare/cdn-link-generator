@@ -25,6 +25,7 @@ import {
   TablePage,
   copyFromWorker,
   downloadBuffer,
+  onExportStatus,
   pipeline,
 } from "../workers/pipeline-client";
 import {
@@ -156,6 +157,15 @@ export default function Generator() {
   // Repo key the Pages probe last ran for — prevents refetch loops with the
   // [mode, parsed, token] deps (parseRepoLines returns a fresh array each edit).
   const withPagesRef = useRef("");
+
+  // Surface worker export-status notes ("uploading to Gofile.io…") as a live
+  // notice — a multi-GB upload otherwise looks like a frozen page.
+  useEffect(() => {
+    const off = onExportStatus((message) => {
+      setNotice({ kind: "info", text: message });
+    });
+    return off;
+  }, []);
 
   const parsed = useMemo(() => parseRepoLines(repoText), [repoText]);
   const selectedProviders = useMemo(
@@ -1280,51 +1290,7 @@ export default function Generator() {
                             </p>
                           </div>
                         )}
-                        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                          {filterResults.slice(0, FILTER_CARDS_MAX).map((r) => (
-                            <div
-                              key={r.domain}
-                              className={`rounded-lg border px-3 py-2 font-mono text-xs ${
-                                r.blocked
-                                  ? "border-danger/40 bg-danger/5 text-danger"
-                                  : "border-ink-600 bg-ink-900/60 text-slate-300"
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="truncate" title={r.domain}>
-                                  {r.domain}
-                                </span>
-                                <span className="shrink-0">{r.blocked ? "BLOCKED" : "clear"}</span>
-                              </div>
-                              <div className="mt-1 flex flex-wrap gap-1">
-                                {FILTERS.map((f) => {
-                                  const entry = r.results.find((x) => x.name === f.name);
-                                  return (
-                                    <span
-                                      key={f.name}
-                                      title={`${f.name} — ${f.description}${
-                                        entry?.error
-                                          ? `\nerror — ${entry.error}`
-                                          : entry?.blocked
-                                            ? "\nverdict: blocked"
-                                            : "\nverdict: not blocked"
-                                      }`}
-                                      className={`rounded px-1 py-0.5 text-[9px] uppercase ${
-                                        entry?.error
-                                          ? "bg-ink-800 text-slate-500"
-                                          : entry?.blocked
-                                            ? "bg-danger/20 text-danger"
-                                            : "bg-accent/10 text-accent-soft"
-                                      }`}
-                                    >
-                                      {f.short}
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
+                        <FilterResultCards results={filterResults} />
                         {filterSummary.some((s) => s.hits > 0) && (
                           <p className="mt-3 text-[11px] text-slate-500">
                             {filterSummary
@@ -1439,6 +1405,60 @@ export default function Generator() {
     </div>
   );
 }
+
+/** Probed-target cards for the Filter Checker panel. Memoized: the parent
+ * re-renders on every 250ms progress tick while the checker runs, and this
+ * grid (up to 120 cards × 14 engine chips) is the most expensive static
+ * subtree — with stable props React now skips it entirely. */
+const FilterResultCards = memo(function FilterResultCards({ results }: { results: DomainFilterResult[] }) {
+  return (
+    <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+      {results.slice(0, FILTER_CARDS_MAX).map((r) => (
+        <div
+          key={r.domain}
+          className={`rounded-lg border px-3 py-2 font-mono text-xs ${
+            r.blocked
+              ? "border-danger/40 bg-danger/5 text-danger"
+              : "border-ink-600 bg-ink-900/60 text-slate-300"
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate" title={r.domain}>
+              {r.domain}
+            </span>
+            <span className="shrink-0">{r.blocked ? "BLOCKED" : "clear"}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {FILTERS.map((f) => {
+              const entry = r.results.find((x) => x.name === f.name);
+              return (
+                <span
+                  key={f.name}
+                  title={`${f.name} — ${f.description}${
+                    entry?.error
+                      ? `\nerror — ${entry.error}`
+                      : entry?.blocked
+                        ? "\nverdict: blocked"
+                        : "\nverdict: not blocked"
+                  }`}
+                  className={`rounded px-1 py-0.5 text-[9px] uppercase ${
+                    entry?.error
+                      ? "bg-ink-800 text-slate-500"
+                      : entry?.blocked
+                        ? "bg-danger/20 text-danger"
+                        : "bg-accent/10 text-accent-soft"
+                  }`}
+                >
+                  {f.short}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+});
 
 /**
  * Paged link table. Rows arrive pre-sliced from the worker (status already

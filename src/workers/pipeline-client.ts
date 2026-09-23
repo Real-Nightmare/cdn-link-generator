@@ -57,6 +57,15 @@ export interface FilterDone {
 
 type ProgressHandler = (kind: "gen" | "validate" | "filters", payload: unknown) => void;
 
+/** Global export-status listeners — the worker broadcasts one-off notes
+ * ("uploading to Gofile…") outside any pending-call context; the UI
+ * subscribes to show them instead of leaving a huge upload invisible. */
+const exportStatusListeners = new Set<(message: string) => void>();
+export function onExportStatus(fn: (message: string) => void): () => void {
+  exportStatusListeners.add(fn);
+  return () => exportStatusListeners.delete(fn);
+}
+
 // Standard worker constructor — Vite bundles ./pipeline-worker.ts as its own
 // chunk for both dev and build (no ?worker suffix needed).
 function createWorker(): Worker {
@@ -109,10 +118,14 @@ function getWorker(): Worker {
       } else if (msg.type === "export") {
         entry.resolve({ buf: msg.buf, filename: msg.filename });
       } else if (msg.type === "exportProgress") {
-        // One-off status note (validation skipped, Gofile upload started).
-        // Console only — the UI surfaces outcomes via results/filenames.
+        // One-off status note (Gofile upload started, validation skipped).
+        // Surface globally so a multi-minute upload of a multi-GB export
+        // doesn't read as a frozen page — plus console for debugging.
         const p = msg.payload as { message?: string } | undefined;
-        if (p?.message) console.info(`[worker] ${p.message}`);
+        if (p?.message) {
+          console.info(`[worker] ${p.message}`);
+          for (const fn of exportStatusListeners) fn(p.message);
+        }
       }
     };
     w.onerror = (ev) => {

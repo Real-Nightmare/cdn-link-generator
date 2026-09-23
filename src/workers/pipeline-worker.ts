@@ -18,13 +18,14 @@ import { validateLinks } from "../lib/github";
 import { checkDomains } from "../filter-apis/runner";
 import { FILTERS as FILTER_DEFS, PATH_AWARE_FILTERS, type DomainFilterResult } from "../filter-apis/registry";
 import {
+  BlobSpool,
   buildCsvChunks,
   buildJsonChunks,
   buildTextChunks,
   type ExportRow,
   type JsonLink,
 } from "../lib/export-builders";
-import { uploadToGofile, shouldOffloadToGofile, chunkSize } from "../lib/gofile";
+import { uploadToGofile, shouldOffloadToGofile, GOFILE_OFFLOAD_LINK_COUNT } from "../lib/gofile";
 import {
   buildFilterPlan,
   countFilterVerdicts,
@@ -105,6 +106,13 @@ function inScope(url: string, scope: string): boolean {
     return !state.filter.blockedKeys.has(key) && !state.filter.blockedHosts.has(keyOfTargetDomain(key));
   }
   return true;
+}
+
+/** Exact link count for a scope — arithmetic (no dataset walk). The ZIP
+ * path computed this inline; hoisted so exports can use it for the Gofile
+ * ≥2M-link offload trigger. */
+function scopedCount(scope: string): number {
+  return scope === "valid" ? state.validSet.size : scope === "safe" ? state.filter.filterSafeCount : state.totalUrls;
 }
 
 /** Lazy scoped URL iterator — never materializes the full array. */
@@ -370,37 +378,78 @@ function runPage(msg: { gen: number; offset: number; limit: number; validateOn: 
 
 const COPY_CHAR_LIMIT = 400_000_000; // ~400M chars — clipboard ceiling guard
 
+// ── Export spooling: build straight into a disk-backed Blob ─────────────────
+// BlobSpool lives in export-builders (shared with the ZIP builder): each
+// batch lands in the spool and is freed from JS heap immediately, and the
+// accumulated parts roll into one Blob every second so peak heap is one
+// batch + one roll-up regardless of export size.
+
+/** Post a Gofile upload-progress note at most twice a second. */
+function gofileProgressPoster(gen: number): (sent: number, total: number) => void {
+  let last = 0;
+  return (sent, total) => {
+    const now = Date.now();
+    if (total > 0 && now - last >= 500) {
+      last = now;
+      post({ type: "exportProgress", gen, payload: { message: `Uploading to Gofile.io… ${Math.round((sent / total) * 100)}%` } });
+    }
+  };
+}
+
+/** Build-phase note ("Preparing export… N MB spooled") at most ~1.4/s — the
+ * build of a multi-GB export used to be totally silent, which read as a
+ * frozen page (or a crash waiting to happen). */
+function buildProgressPoster(gen: number): (spooledBytes: number) => void {
+  let last = 0;
+  return (bytes) => {
+    const now = Date.now();
+    if (now - last >= 700) {
+      last = now;
+      post({ type: "exportProgress", gen, payload: { message: `Preparing export… ${Math.round(bytes / 1048576)} MB spooled` } });
+    }
+  };
+}
+
+/** Sink that spools a batch and emits throttled build progress. */
+function progressSink(spool: BlobSpool, poster: (bytes: number) => void): (text: string) => void {
+  return (text) => {
+    spool.addText(text);
+    poster(spool.bytes);
+  };
+}
+
 /** Post an export as a transferred buffer, or — when the payload is huge —
- * upload a lazy chunked Blob to Gofile and return the link instead. The
- * giant payload is NEVER materialized as one string/bytes copy. */
+ * upload the spooled Blob to Gofile and return the link instead. The giant
+ * payload is NEVER materialized as one string/bytes copy. */
 async function postExport(
-  msg: { gen: number; filename: string },
-  build: { chunks: string[] } | { bytes: Uint8Array; mime: string },
+  msg: { gen: number; filename: string; linkCount?: number },
+  build: { spool: BlobSpool; linkCount?: number } | { bytes: Uint8Array; mime: string },
 ): Promise<void> {
   if ("bytes" in build) {
     const { bytes, mime } = build;
     if (shouldOffloadToGofile(null, bytes.byteLength)) {
       post({ type: "exportProgress", gen: msg.gen, payload: { message: `Large export (${Math.round(bytes.byteLength / 1048576)} MB) — uploading to Gofile.io…` } });
-      const up = await uploadToGofile(new Blob([bytes.buffer as ArrayBuffer]), msg.filename);
+      const up = await uploadToGofile(new Blob([bytes.buffer as ArrayBuffer]), msg.filename, gofileProgressPoster(msg.gen));
       post({ type: "export", gen: msg.gen, filename: `GOFILE:${up.url}` });
       return;
     }
     post({ type: "export", gen: msg.gen, filename: msg.filename, mime, buf: bytes }, [bytes.buffer]);
     return;
   }
-  // Chunk-built export: decide before joining — no double copy of huge data.
-  const { chunks } = build;
-  if (shouldOffloadToGofile(chunks, 0)) {
-    const mb = Math.round(chunkSize(chunks) / 1048576);
+  // Spooled export: decide from the spool's byte counter — no join, no copy.
+  // linkCount (when the caller knows the scoped total) forces the offload at
+  // ≥2M links regardless of the byte estimate — a 2M+ list always becomes a
+  // shareable Gofile link, never a stalled local download.
+  const { spool, linkCount } = build;
+  if (shouldOffloadToGofile(null, spool.bytes, linkCount)) {
+    const mb = Math.round(spool.bytes / 1048576);
     post({ type: "exportProgress", gen: msg.gen, payload: { message: `Large export (~${mb} MB) — uploading to Gofile.io…` } });
-    const blob = new Blob(
-      chunks.map((c) => new Blob([c], { type: "text/plain" })),
-    );
-    const up = await uploadToGofile(blob, msg.filename);
+    const up = await uploadToGofile(spool.finish(), msg.filename, gofileProgressPoster(msg.gen));
     post({ type: "export", gen: msg.gen, filename: `GOFILE:${up.url}` });
     return;
   }
-  const bytes = new TextEncoder().encode(chunks.join(""));
+  // Small: read the spooled blob back once (single materialization, ≤20MB).
+  const bytes = new Uint8Array(await spool.finish().arrayBuffer());
   post({ type: "export", gen: msg.gen, filename: msg.filename, mime: "text/plain", buf: bytes }, [bytes.buffer]);
 }
 
@@ -410,26 +459,38 @@ async function runCopyText(msg: { gen: number; scope: string }): Promise<void> {
       throw new Error("No safe links yet — run the Filter Checker first");
     }
     // Copy builds chunked with a hard ceiling. Anything at/over the Gofile
-    // threshold uploads instead of failing: the clipboard gets a shareable
-    // link, which is also what users actually want for huge lists.
-    const chunks: string[] = [];
+    // threshold (bytes OR ≥2M links) uploads instead of failing: the clipboard
+    // gets a shareable link, which is also what users actually want for huge
+    // lists.
+    const linkCount = scopedCount(msg.scope);
+    if (linkCount >= GOFILE_OFFLOAD_LINK_COUNT) {
+      // Don't even build 2M+ strings just to throw them at the clipboard —
+      // upload a streamed, spooled list instead.
+      const spool = new BlobSpool();
+      await buildTextChunks(scopedUrls(msg.scope), (c) => spool.addText(c));
+      post({ type: "exportProgress", gen: msg.gen, payload: { message: `Copy list too big for the clipboard (~${Math.round(spool.bytes / 1048576)} MB) — uploading to Gofile.io…` } });
+      const up = await uploadToGofile(spool.finish(), `cdn_links_copy_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`, gofileProgressPoster(msg.gen));
+      post({ type: "copyText", gen: msg.gen, text: up.url });
+      return;
+    }
+    // Spool from the start: strings are freed per-batch, the size ceiling is
+    // still enforced by a counter, and the offload decision reads spool.bytes
+    // — the payload is never held as a JS string/array.
+    const spool = new BlobSpool();
     let size = 0;
     for (const url of scopedUrls(msg.scope)) {
       size += url.length + 1;
       if (size > COPY_CHAR_LIMIT) throw new Error("Too many links to copy — use a download instead");
-      chunks[chunks.length - 1] === undefined || chunks[chunks.length - 1].length >= 1_000_000
-        ? chunks.push(url)
-        : (chunks[chunks.length - 1] += "\n" + url);
+      spool.addText(url + "\n");
     }
-    if (shouldOffloadToGofile(chunks, 0)) {
-      const mb = Math.round(chunkSize(chunks) / 1048576);
+    if (shouldOffloadToGofile(null, spool.bytes)) {
+      const mb = Math.round(spool.bytes / 1048576);
       post({ type: "exportProgress", gen: msg.gen, payload: { message: `Copy list too big for the clipboard (~${mb} MB) — uploading to Gofile.io…` } });
-      const blob = new Blob(chunks.map((c) => new Blob([c], { type: "text/plain" })));
-      const up = await uploadToGofile(blob, `cdn_links_copy_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`);
+      const up = await uploadToGofile(spool.finish(), `cdn_links_copy_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.txt`, gofileProgressPoster(msg.gen));
       post({ type: "copyText", gen: msg.gen, text: up.url });
       return;
     }
-    post({ type: "copyText", gen: msg.gen, text: chunks.join("\n") });
+    post({ type: "copyText", gen: msg.gen, text: await spool.finish().text() });
   } catch (err) {
     post({ type: "error", gen: msg.gen, message: err instanceof Error ? err.message : String(err) });
   }
@@ -453,6 +514,9 @@ async function runExport(msg: {
     if (msg.scope === "safe" && !state.filter.plan) {
       throw new Error("No safe links yet — run the Filter Checker first");
     }
+    // Scoped link total for the Gofile link-count trigger — the exact count
+    // is known before anything is built (arithmetic, no dataset walk).
+    const scopedLinkCount = scopedCount(msg.scope);
 
     // Per-filter export (Filter Checker panel chips): "clear" keeps URLs whose
     // per-filter verdict for THIS filter is NOT blocked; "blocked" keeps URLs
@@ -473,7 +537,9 @@ async function runExport(msg: {
       // Host-keyed engines decided the whole host at once, so unsampled paths
       // inherit the bare-host verdict in BOTH directions.
       const pathAware = PATH_AWARE_FILTERS.has(msg.filterName);
-      const chunks: string[] = [];
+      const spool = new BlobSpool();
+      const sink = progressSink(spool, buildProgressPoster(msg.gen));
+      let matched = 0;
       await buildTextChunks(
         (function* (): Generator<string> {
           for (const e of iterUrlEntries(state.result!.set)) {
@@ -487,23 +553,30 @@ async function runExport(msg: {
             }
             // Fail closed: an errored/missing verdict means UNKNOWN, and an
             // unknown link must NOT land in the "clear" OR the "blocked" list.
-            if (v && !v.error && v.blocked === wantBlocked) yield e.url;
+            if (v && !v.error && v.blocked === wantBlocked) {
+              matched++;
+              yield e.url;
+            }
           }
         })(),
-        (c) => chunks.push(c),
+        sink,
       );
-      await postExport(msg, { chunks });
+      // Link-count trigger for the Gofile offload even when the byte check
+      // alone would be borderline (very short URLs can dodge 20MB at 2M+).
+      await postExport(msg, { spool, linkCount: matched });
       return;
     }
 
     if (msg.kind !== "zip") {
-      // Single-file export: build chunked; small payloads join + transfer,
-      // huge ones upload to Gofile straight from the chunks (never joined).
-      const chunks: string[] = [];
-      if (msg.kind === "txt") await buildTextChunks(scopedUrls(msg.scope), (c) => chunks.push(c));
-      else if (msg.kind === "csv") await buildCsvChunks(scopedRows(msg.scope), (c) => chunks.push(c));
-      else await buildJsonChunks(scopedJsonLinks(msg.scope), new Date().toISOString(), (c) => chunks.push(c));
-      await postExport(msg, { chunks });
+      // Single-file export: streamed straight into a disk-backed spool —
+      // the payload never exists as a JS string/array; small results are
+      // read back once for a local download, huge ones upload the Blob.
+      const spool = new BlobSpool();
+      const sink = progressSink(spool, buildProgressPoster(msg.gen));
+      if (msg.kind === "txt") await buildTextChunks(scopedUrls(msg.scope), sink);
+      else if (msg.kind === "csv") await buildCsvChunks(scopedRows(msg.scope), sink);
+      else await buildJsonChunks(scopedJsonLinks(msg.scope), new Date().toISOString(), sink);
+      await postExport(msg, { spool, linkCount: scopedLinkCount });
       return;
     }
 
@@ -518,33 +591,28 @@ async function runExport(msg: {
     }
 
     const entries: ZipLazyEntry[] = [];
+    // Streaming `add` entries: parts spool per-batch as they're produced —
+    // a 45M-link .txt entry never holds its strings in heap.
     entries.push({
       name: `${scope === "all" ? "all" : scope}-links.txt`,
-      parts: async () => {
-        const chunks: string[] = [];
-        await buildTextChunks(scopedUrls(scope), (c) => chunks.push(c));
-        return chunks;
+      add: async (sink) => {
+        await buildTextChunks(scopedUrls(scope), sink);
       },
     });
     entries.push({
       name: "links.csv",
-      parts: async () => {
-        const chunks: string[] = [];
-        await buildCsvChunks(scopedRows(scope), (c) => chunks.push(c));
-        return chunks;
+      add: async (sink) => {
+        await buildCsvChunks(scopedRows(scope), sink);
       },
     });
     entries.push({
       name: "links.json",
-      parts: async () => {
-        const chunks: string[] = [];
-        await buildJsonChunks(scopedJsonLinks(scope), new Date().toISOString(), (c) => chunks.push(c));
-        return chunks;
+      add: async (sink) => {
+        await buildJsonChunks(scopedJsonLinks(scope), new Date().toISOString(), sink);
       },
     });
 
-    const scopedTotal =
-      scope === "valid" ? state.validSet.size : scope === "safe" ? state.filter.filterSafeCount : state.totalUrls;
+    const scopedTotal = scopedCount(scope);
     entries.push({
       name: "README.txt",
       parts: async () => [
@@ -562,15 +630,13 @@ async function runExport(msg: {
     for (const [provider] of byProvider) {
       entries.push({
         name: `${provider.replace(/[^\w.-]+/g, "-")}.txt`,
-        parts: async () => {
-          const chunks: string[] = [];
+        add: async (sink) => {
           const urls = (function* (): Generator<string> {
             for (const e of iterUrlEntries(state.result!.set)) {
               if (e.provider.name === provider && inScope(e.url, scope)) yield e.url;
             }
           })();
-          await buildTextChunks(urls, (c) => chunks.push(c));
-          return chunks;
+          await buildTextChunks(urls, sink);
         },
       });
     }
@@ -579,6 +645,7 @@ async function runExport(msg: {
       entries.push({ name: "broken-links.txt", parts: async () => [[...state.brokenSet].join("\n")] });
     }
 
+    post({ type: "exportProgress", gen: msg.gen, payload: { message: "Preparing ZIP export…" } });
     const zip = await buildZipLazy(entries);
     // The Blob is spooled (disk-backed for big payloads): decide the offload
     // from its size BEFORE materializing bytes for transfer.
@@ -589,7 +656,7 @@ async function runExport(msg: {
       return;
     }
     const zipBytes = new Uint8Array(await zip.arrayBuffer());
-    await postExport(msg, { bytes: zipBytes, mime: "application/zip" });
+    await postExport(msg, { bytes: zipBytes, mime: "application/zip", linkCount: scopedLinkCount });
   } catch (err) {
     post({ type: "error", gen: msg.gen, message: err instanceof Error ? err.message : String(err) });
   }

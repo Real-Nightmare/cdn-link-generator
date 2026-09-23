@@ -9,6 +9,52 @@ function tick(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
 
+const SPOOL_FLUSH_MS = 1000;
+
+/**
+ * Spool export batches straight into a disk-backed Blob. Holding every batch
+ * string in a chunks[] array until upload/transfer time peaked at ~2× the
+ * payload in worker heap (12M links ≈ 1.3GB) — the "Aw, Snap" crash on the
+ * txt button. Here each batch is added to the spool and its string is freed
+ * right after; roughly every second the accumulated parts roll into one Blob
+ * (browsers back big Blobs with disk/OS storage, NOT the JS heap), so peak
+ * heap is one batch + one roll-up regardless of export size.
+ */
+export class BlobSpool {
+  private parts: BlobPart[] = [];
+  private rolled: Blob[] = [];
+  private lastRoll = Date.now();
+  /** Total bytes spooled so far — the offload decision reads this. */
+  bytes = 0;
+
+  addText(text: string): void {
+    this.parts.push(text);
+    this.bytes += text.length;
+    if (Date.now() - this.lastRoll >= SPOOL_FLUSH_MS) this.roll();
+  }
+
+  addBytes(bytes: Uint8Array): void {
+    // Same boundary reasoning as buildZipLazy: TextEncoder's Uint8Array is
+    // ArrayBufferLike at the type level, plain ArrayBuffer at runtime.
+    this.parts.push(bytes as unknown as BlobPart);
+    this.bytes += bytes.length;
+    if (Date.now() - this.lastRoll >= SPOOL_FLUSH_MS) this.roll();
+  }
+
+  private roll(): void {
+    if (this.parts.length === 0) return;
+    this.rolled.push(new Blob(this.parts));
+    this.parts = [];
+    this.lastRoll = Date.now();
+  }
+
+  /** The finished payload as ONE Blob (inner blobs referenced, not copied). */
+  finish(): Blob {
+    this.roll();
+    return this.rolled.length === 1 ? this.rolled[0] : new Blob(this.rolled);
+  }
+}
+
 const esc = (s: string) => `"${s.replaceAll('"', '""')}"`;
 
 export interface ExportRow {
