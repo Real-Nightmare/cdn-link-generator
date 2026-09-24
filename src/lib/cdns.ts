@@ -151,17 +151,6 @@ export const CDN_PROVIDERS: CDNProvider[] = [
     requiresOwnHost: true,
     note: "Your Bunny pull zone backed by the repo — add the zone name in Settings",
   },
-  {
-    id: 25,
-    name: "BYOD IPs",
-    domain: "your IPs",
-    format: "byod",
-    svgOnly: false,
-    category: "proxy",
-    optional: true,
-    requiresOwnHost: true,
-    note: "Your own IPs/hosts (one link per host) — add them under the CDN list",
-  },
 ];
 
 export const CATEGORY_LABELS: Record<CDNCategory, string> = {
@@ -414,10 +403,9 @@ export function byodSlots(hosts: string[]): LinkSlot[] {
   return hosts.length === 0 ? [] : byodProviders(hosts).map((provider) => ({ provider, variant: "ref" as const }));
 }
 
-/** Whether the selection includes the BYOD entry (id 25). */
-export function hasByodProvider(sel: { id: number }[]): boolean {
-  return sel.some((c) => c.id === 25);
+/** Whether BYOD hosts are enabled for this run (hosts typed in the BYOD box).
+ * BYOD is no longer a checkbox in the CDN list — the dedicated BYOD section
+ * controls it; an empty host list means no BYOD slots. */
+export function hasByodHosts(hosts: string[]): boolean {
+  return hosts.length > 0;
 }
-
-/** Static BYOD entry — for UI labels/lists only (slots use synthetic providers). */
-export const BYOD_PROVIDER_REF: CDNProvider = CDN_PROVIDERS.find((c) => c.id === 25)!;

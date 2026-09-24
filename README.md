@@ -24,7 +24,7 @@ The **Seeder** page writes to your repos straight from the browser (token needs 
 - **SVG Cloner** — scan any repo for its `.svg` files, tick the ones you want, and clone them into the target repo in one batched commit. If the token can't push to the source repo (a different account), the cloner **forks it to your account first** and clones from the fork — Git's content-addressed blobs make the copy free.
 - **Artificial commits** — forge 1–**50** real commits that alternate adding and removing a tiny marker file under `.autogen/` (customizable base name, and they can target a new or existing branch), creating genuine history and SHAs that every CDN link can point at. Auto-commit mode keeps forging on a timer (1–60s) until you stop it or the cap is hit. One-click purge removes everything the feature created.
 
-### Supported providers (25 + BYOD)
+### Supported providers (24 + BYOD hosts)
 
 Every URL format is live-tested against a real commit / package before shipping.
 
@@ -42,14 +42,25 @@ Every URL format is live-tested against a real commit / package before shipping.
 | 23–24 | gh.llkk.cc, ghfast.top | Optional proxy wrappers |
 | 21 | `{owner}.github.io` | Optional — requires a Pages site |
 | 22 | Bunny CDN (`{zone}.b-cdn.net`) | Optional — your own pull zone mirroring raw.githubusercontent.com; set the zone in Link Studio |
-| 25 | BYOD IPs | Optional — your own IPs/hosts, one extra link per host (see below) |
 | 16 | esm.sh | ESM CDN |
 | 19 | unpkg.com | Optional — npm package mode |
 | 20 | jsDelivr npm | Optional — npm package mode |
 
-### BYOD IPs — bring your own serving hosts
+### BYOD IPs — a dedicated section with 24 provider recipes
 
-Select the **BYOD IPs** provider and a textarea appears under the CDN list. Paste up to **256** of your own IPs or hosts — IPv4 (`203.0.113.7`), IPv6 in brackets (`[2001:db8::1]`), hostnames (`mirror.example.com`), optional ports (`10.0.0.14:8080`). Newlines, commas or spaces separate entries; `#` starts a comment; duplicates and junk are dropped automatically. Every valid host becomes its own extra serving slot, so **every asset × commit gains one more link per host** — at the same few-MB LinkSet cost (each slot is a ~100-byte prefix template, never a materialized URL).
+The Studio has a **dedicated BYOD IPs & hosts section** (no longer a checkbox in the CDN list). Paste up to **256** of your own IPs or hosts — IPv4 (`203.0.113.7`), IPv6 in brackets (`[2001:db8::1]`), hostnames (`mirror.example.com`), optional ports (`10.0.0.14:8080`). Newlines, commas or spaces separate entries; `#` starts a comment; duplicates and junk are dropped automatically. Every valid host becomes its own extra serving slot, so **every asset × commit gains one more link per host** — at the same few-MB LinkSet cost (each slot is a ~100-byte prefix template, never a materialized URL).
+
+The section ships a **provider directory** for getting that IP onto the internet, grouped in five kinds:
+
+| Kind | Providers | Needs token? |
+|---|---|---|
+| Tunnels (expose localhost) | Cloudflare Quick Tunnel, localhost.run, Serveo, bore, Pinggy, tunnelmole, localtunnel, Telebit, zrok, ngrok | only zrok & ngrok |
+| IP → name (wildcard DNS) | sslip.io, nip.io | none |
+| Dynamic DNS | DuckDNS, dynv6, Dynu, No-IP, ChangeIP, ClouDNS | none |
+| Free DNS for your domain | FreeDNS (afraid.org), Hurricane Electric, 1984 Hosting, deSEC | none |
+| Free static hosting | Netlify Drop, Vercel, Render, Surge.sh | none |
+
+Tunnel entries carry a one-line setup command you can copy with a click; every entry links to its site. **22 of 24 providers need no account at all** — only ngrok and zrok ask for a (free) token.
 
 - Link shape: `https://host/owner/repo/sha/path.svg` (mirror-style path, like Githack) — point the host at your repo origin, or any server that reflects the path. Bare ports serve `http://`, everything else `https://`.
 - **Filter Checker aware**: each BYOD IP is its own serving host in the probe plan — host-level engines verdict that IP's links alone, path-aware engines probe the IP's distinct paths, and a blocked IP flags only its own links (never the CDNs').

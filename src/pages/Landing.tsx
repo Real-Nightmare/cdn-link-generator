@@ -24,6 +24,11 @@ const FEATURES = [
     body: "One-tap presets — Recommended, UBG bulk, jsDelivr only — over providers grouped by type, with optional extras like Pages clearly marked.",
   },
   {
+    icon: "🖥️",
+    title: "BYOD IPs & hosts",
+    body: "Bring your own IP — tunnels (Cloudflare, localhost.run, Serveo, bore), IP→name magic (sslip.io, nip.io), FreeDNS, DuckDNS and more turn any IP into working links. 24 providers, only ngrok & zrok need a token.",
+  },
+  {
     icon: "✅",
     title: "Live Validation",
     body: "Every generated link is checked from your browser in parallel, so you only ship URLs that actually respond.",
@@ -74,7 +79,7 @@ const FAQS = [
   },
   {
     q: "Which providers are optional?",
-    a: "GitHub Pages only works for repos that actually publish a Pages site, and the npm CDNs (UNPKG, jsDelivr npm) need a package name — so both are opt-in and clearly marked. Everything else works out of the box.",
+    a: "GitHub Pages only works for repos that actually publish a Pages site, and the npm CDNs (UNPKG, jsDelivr npm) need a package name — so both are opt-in and clearly marked. Everything else works out of the box. Want links on your OWN host? The BYOD section has 24 providers (tunnels, dynamic DNS, IP→name magic) — all but ngrok and zrok need zero signup.",
   },
   {
     q: "Why are links pinned to commit SHAs?",
