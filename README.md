@@ -46,9 +46,31 @@ Every URL format is live-tested against a real commit / package before shipping.
 | 19 | unpkg.com | Optional — npm package mode |
 | 20 | jsDelivr npm | Optional — npm package mode |
 
-### BYOD IPs — a dedicated section with 24 provider recipes
+### BYOD IPs — a dedicated section with 24 provider recipes + automated FreeDNS
 
 The Studio has a **dedicated BYOD IPs & hosts section** (no longer a checkbox in the CDN list). Paste up to **256** of your own IPs or hosts — IPv4 (`203.0.113.7`), IPv6 in brackets (`[2001:db8::1]`), hostnames (`mirror.example.com`), optional ports (`10.0.0.14:8080`). Newlines, commas or spaces separate entries; `#` starts a comment; duplicates and junk are dropped automatically. Every valid host becomes its own extra serving slot, so **every asset × commit gains one more link per host** — at the same few-MB LinkSet cost (each slot is a ~100-byte prefix template, never a materialized URL).
+
+#### ⚡ Automated FreeDNS (domain92 style)
+
+The BYOD section embeds an **automator for freedns.afraid.org** — the same flow as [sebastian-92/domain92](https://github.com/sebastian-92/domain92) (which automates FreeDNS via [ading2210's freedns-client](https://github.com/ading2210/freedns-client) and a guerrillamail temp inbox), now built into the app:
+
+1. **Captcha → account** — solve one FreeDNS captcha; the app creates the account with a temp inbox as the email
+2. **Auto-activation** — the relay (`api/freedns.py`) polls the temp inbox, catches the FreeDNS activation mail and opens the activation link — no inbox visit, no pip install, no CLI
+3. **Registry browser** — search/paginate the **21,000+ shared public domains** (`mooo.com`, `chickenkiller.com`, `strangled.net`, …)
+4. **Least-popular domains** — a one-click sort reversal counts pages from the registry's *last* page instead of the first, so page 1 shows the shared domains with only **3–4 hosts in use** (live-verified: page 1 under popularity sort = `mooo.com` with 870k hosts; page 214 = domains nobody uses). Tiny shared domains mean subdomains nobody has burned yet — the relay fetches FreeDNS's tail pages (`sort=5`, reversed paging) and caches the page count per search.
+5. **Record → BYOD** — create `yourname.<domain> A <your IP>` (IP pre-filled with the browser's public IP; AAAA/CNAME supported). The new host is **adopted straight into the BYOD box**, so links come out on it immediately
+6. **Dynamic DNS** — existing records are listed and can be **repointed** at a new IP with one captcha
+
+FreeDNS sends no CORS headers, so the browser talks to `api/freedns.py` — a **stdlib-only** Python relay deployed alongside the site (same shape as the Filter Checker's `api/filter.py`, ASGI + Lambda handlers, in-memory sessions). Captchas are the only manual step; FreeDNS requires them for signup, login anomalies, and every record change. If the relay isn't deployed on the current host, the automator says so and manual BYOD entry keeps working.
+
+#### 🧰 More BYOD automators — every other provider kind
+
+The FreeDNS panel's siblings live in a second toolbox below it (one tool per directory kind):
+
+- **🪄 IP → name composer** (sslip.io / nip.io) — **100% client-side, zero network**: wildcard DNS needs no account and no API, the name *is* the IP. Type your IPv4/IPv6 (+ optional port), pick `.sslip.io` or `.nip.io`, adopt `203.0.113.7.sslip.io` straight into the BYOD box.
+- **🔁 Dynamic DNS updater** (DuckDNS, dynv6, Dynu, No-IP, ChangeIP, deSEC) — create the free hostname on the provider's site once, then point it at your IP from here: the same update their script does, sent through the relay's stateless `kind=dyndns` op (verified live: DuckDNS `OK`, dynv6/dynu/noip dyndns2 `good <ip>`, ChangeIP query-creds, deSEC basic-auth). Your IP changed? Update again — leave the IP empty to use the browser's public IP. (ClouDNS stays manual: its API is a signed GET with no CORS-free path.)
+- **🛤️ Tunnel launcher** (all 10 tunnels) — tunnels print a random host from a process on your machine, so the app can't create it: copy the one-liner → run it → paste the printed host back → adopted.
+- **🧭 Full DNS panels** (deSEC, Hurricane Electric, 1984) — guided three-step flow (account → A record → paste host); deSEC's `dedyn.io` DDNS endpoint also works in the updater above.
 
 The section ships a **provider directory** for getting that IP onto the internet, grouped in five kinds:
 
@@ -57,10 +79,10 @@ The section ships a **provider directory** for getting that IP onto the internet
 | Tunnels (expose localhost) | Cloudflare Quick Tunnel, localhost.run, Serveo, bore, Pinggy, tunnelmole, localtunnel, Telebit, zrok, ngrok | only zrok & ngrok |
 | IP → name (wildcard DNS) | sslip.io, nip.io | none |
 | Dynamic DNS | DuckDNS, dynv6, Dynu, No-IP, ChangeIP, ClouDNS | none |
-| Free DNS for your domain | FreeDNS (afraid.org), Hurricane Electric, 1984 Hosting, deSEC | none |
+| Free DNS for your domain | FreeDNS (afraid.org) — ⚡ **automated in-app**, Hurricane Electric, 1984 Hosting, deSEC | none |
 | Free static hosting | Netlify Drop, Vercel, Render, Surge.sh | none |
 
-Tunnel entries carry a one-line setup command you can copy with a click; every entry links to its site. **22 of 24 providers need no account at all** — only ngrok and zrok ask for a (free) token.
+Tunnel entries carry a one-line setup command you can copy with a click; every entry links to its site. **22 of 24 providers need no account at all** — only ngrok and zrok ask for a (free) token. Directory notes mark which providers have an in-app automator (⚡ full auto, 🧰 compose, 🔁 relay update).
 
 - Link shape: `https://host/owner/repo/sha/path.svg` (mirror-style path, like Githack) — point the host at your repo origin, or any server that reflects the path. Bare ports serve `http://`, everything else `https://`.
 - **Filter Checker aware**: each BYOD IP is its own serving host in the probe plan — host-level engines verdict that IP's links alone, path-aware engines probe the IP's distinct paths, and a blocked IP flags only its own links (never the CDNs').
@@ -69,7 +91,7 @@ Tunnel entries carry a one-line setup command you can copy with a click; every e
 
 ## Privacy
 
-There is no backend for your data. Everything — scanning, generation, validation, your token, your settings — runs and lives in your browser (`localStorage`), with the entire heavy pipeline (generation, validation, filter checks, exports) executed in a **background Web Worker** so multi-hundred-thousand-link runs never freeze the page. The only network calls made are to `api.github.com`, the CDN URLs you validate, the public filter-vendor endpoints the Filter Checker probes, and `api/filter.py` (a stdlib-only Python proxy deployed alongside the site for filter endpoints without CORS headers).
+There is no backend for your data. Everything — scanning, generation, validation, your token, your settings — runs and lives in your browser (`localStorage`), with the entire heavy pipeline (generation, validation, filter checks, exports) executed in a **background Web Worker** so multi-hundred-thousand-link runs never freeze the page. The only network calls made are to `api.github.com`, the CDN URLs you validate, the public filter-vendor endpoints the Filter Checker probes, and the stdlib-only Python relays deployed alongside the site for endpoints without CORS headers (`api/filter.py` for filters, `api/freedns.py` for the FreeDNS automator and the dynamic-DNS updater — wildcard-DNS composition is pure client-side).
 
 - **No token needed** for public repos (60 API requests/hour)
 - **Optional token** raises the limit to 5,000/hour — stored locally, verifiable in one click, never sent anywhere but GitHub

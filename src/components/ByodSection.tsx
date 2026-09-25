@@ -18,6 +18,8 @@ import {
   ByodProvider,
   TUNNEL_COMMANDS,
 } from "../lib/byod-providers";
+import { FreednsAutomation } from "./FreednsAutomation";
+import { ByodAutomators } from "./ByodAutomators";
 
 const KIND_ICONS: Record<ByodKind, string> = {
   tunnel: "🛤️",
@@ -94,6 +96,19 @@ interface Props {
  */
 export const ByodSection = memo(function ByodSection({ value, onChange, hosts, npmMode, disabled }: Props) {
   const [openKind, setOpenKind] = useState<ByodKind | null>("tunnel");
+
+  /** Drop an automated/host into the box (dedup, one per line). */
+  function adoptHost(host: string): void {
+    const t = value.trim();
+    const existing = new Set(
+      t
+        .split(/[\n,;\s]+/)
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (existing.has(host.toLowerCase())) return;
+    onChange(t ? `${t}\n${host}` : host);
+  }
   const ignored =
     value.trim().length > 0 &&
     value
@@ -122,8 +137,9 @@ export const ByodSection = memo(function ByodSection({ value, onChange, hosts, n
       <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
         Your IP serves the page; a free DNS/tunnel service gives it a name. Paste the IP or host here
         and links come out on it — <span className="font-mono text-slate-400">https://host/owner/repo/sha/file.svg</span>.
-        Bare ports serve <span className="font-mono">http://</span>. {BYOD_PROVIDERS.length} providers below,{" "}
-        {BYOD_PROVIDERS.length - 2} need no token (only ngrok &amp; zrok do).
+        Bare ports serve <span className="font-mono">http://</span>. {BYOD_PROVIDERS.length} providers below, and
+        the ⚡/🧰 automators create hosts on them for you — FreeDNS fully automatic, wildcard DNS with zero
+        signup, dynamic-DNS updates through the relay.
       </p>
 
       <textarea
@@ -152,6 +168,14 @@ export const ByodSection = memo(function ByodSection({ value, onChange, hosts, n
           npm mode serves package CDNs only — switch to GitHub repos mode to link through your hosts.
         </p>
       )}
+
+      {/* domain92-style FreeDNS automation — captcha → account → A record on
+          your IP, adopted straight into the box. */}
+      <FreednsAutomation onAdopt={adoptHost} />
+
+      {/* Automators for every other BYOD kind — wildcard DNS composer,
+          dynamic-DNS updater, tunnel launcher, guided DNS panels. */}
+      <ByodAutomators onAdopt={adoptHost} />
 
       {/* Provider directory — grouped, collapsible */}
       <div className="mt-3 border-t border-ink-700 pt-3">

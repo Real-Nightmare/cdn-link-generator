@@ -161,7 +161,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "sslip.io",
     how: "Your IP IS the name: 192.0.2.7 → 192.0.2.7.sslip.io (also 192-0-2-7.sslip.io, ports too)",
     site: "https://sslip.io",
-    note: "Wildcard DNS with no signup — any IP instantly resolvable",
+    note: "🧰 Compose it in-app (zero network) — the IP → name composer in this section",
   },
   {
     kind: "ipmap",
@@ -169,7 +169,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "nip.io",
     how: "192.0.2.7 → 192.0.2.7.nip.io (also dash form 192-0-2-7.nip.io)",
     site: "https://nip.io",
-    note: "Same wildcard magic, long-running classic",
+    note: "Same wildcard magic, long-running classic — 🧰 compose it in-app too",
   },
 
   // ---- Dynamic DNS (free hostnames for your own IP) ----
@@ -179,7 +179,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "duckdns.org",
     how: "yourname.duckdns.org — free account, simple update script/token for changing IPs",
     site: "https://www.duckdns.org",
-    note: "Free forever, generous subdomains, IP updates via a simple URL/script",
+    note: "🔁 Point it at your IP from the in-app Dynamic DNS updater (relay op) — token, free account",
   },
   {
     kind: "dyn",
@@ -187,7 +187,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "dynv6.net",
     how: "yourname.dynv6.net — free account; HTTP/DHCP script updates",
     site: "https://dynv6.com",
-    note: "Free, also hands out full zones and IPv6 prefixes",
+    note: "Free, also hands out full zones and IPv6 prefixes — 🔁 update in-app (token)",
   },
   {
     kind: "dyn",
@@ -195,7 +195,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "dynu.net",
     how: "yourname.dynu.net or your own domain on their DNS — free account",
     site: "https://www.dynu.com",
-    note: "Free dynamic DNS + full DNS hosting, no forced renewals",
+    note: "Free dynamic DNS + full DNS hosting, no forced renewals — 🔁 update in-app (user+pass)",
   },
   {
     kind: "dyn",
@@ -203,7 +203,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "ddns.net",
     how: "yourname.ddns.net — free account; confirm monthly",
     site: "https://www.noip.com",
-    note: "Long-running free dynamic DNS hostnames",
+    note: "Long-running free dynamic DNS hostnames — 🔁 update in-app (user+pass)",
   },
   {
     kind: "dyn",
@@ -211,7 +211,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "changeip.com",
     how: "yourname.changeip.net / .com — free account",
     site: "https://www.changeip.com",
-    note: "Free dynamic DNS + wildcard records on free tiers",
+    note: "Free dynamic DNS + wildcard records on free tiers — 🔁 update in-app (user+pass)",
   },
   {
     kind: "dyn",
@@ -219,7 +219,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "cloudns.net",
     how: "Free subdomain (yourname.cloudns.nz etc.) with dynamic updates — free account",
     site: "https://www.cloudns.net",
-    note: "Free tier includes DDNS and a free subdomain",
+    note: "Free tier includes DDNS and a free subdomain — update via their API key UI (no CORS-free GET)",
   },
 
   // ---- Free DNS hosting (domains you own, or free DNS zones) ----
@@ -229,7 +229,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "mooo.com",
     how: "Point any record at your IP; thousands of shared public subdomains (mooo.com, chickenkiller.com…)",
     site: "https://freedns.afraid.org",
-    note: "The classic free DNS + shared-subdomain pool, no payment",
+    note: "⚡ Automatable in-app (domain92 style) — the ⚡ automator in this section does it end to end",
   },
   {
     kind: "dns",
@@ -253,7 +253,7 @@ export const BYOD_PROVIDERS: ByodProvider[] = [
     domain: "dedyn.io",
     how: "yourname.dedyn.io or your own domain — free DNS + DDNS (token-managed)",
     site: "https://desec.io",
-    note: "Open-source free DNS with dynamic updates on free subdomains",
+    note: "Open-source free DNS — 🔁 dedyn.io DDNS updates work in-app (token as password)",
   },
 
   // ---- Free static hosting (serve files at their domain; no IP needed) ----
