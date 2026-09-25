@@ -37,12 +37,12 @@ Operations
   kind=dyndns&provider=duckdns|dynv6|dynu|noip|changeip|desec
         &host=<name>&ip=<addr>&[token=]&[user=&pass=]
                                                -> {"ok": true, reply}
-        Stateless dynamic-DNS updater ("point <host> at <ip>") for the other
-        BYOD providers. None of these endpoints send CORS headers, so the
-        browser can't call them directly — same reason FreeDNS needs this
-        relay. duckdns/dynv6 use a token, dynu/noip/changeip use user+pass
-        (dyndns2-style), desec uses basic auth (host, token). ip defaults to
-        the requester's public IP when omitted.
+  kind=registrybrowse&page=<n>[&query=][&sort=1..6][&least=1]
+                                               -> domains + paging WITHOUT
+        a FreeDNS login (the registry page is public). Lets the browser
+        browse the shared-domain list even when only static hosting is
+        available; the client can also scrape the public page itself via
+        CORS relays as a final fallback.
 
 `sid` is the relay-side FreeDNS session id returned by captcha/login.
 `msid` is the temp-mail session id from newmail. Sessions live in memory
@@ -602,6 +602,17 @@ def handle_query(params: Dict[str, str]) -> Dict[str, Any]:
         sort = min(6, max(1, sort))
         return s.registry(page=page, query=_q(params, "query"), sort=sort, least=_q(params, "least") == "1")
 
+    if kind == "registrybrowse":
+        # Sessionless registry browsing — the public page needs no login.
+        page = int(_q(params, "page", "1") or "1")
+        try:
+            sort = int(_q(params, "sort", "5") or "5")
+        except ValueError:
+            sort = 5
+        sort = min(6, max(1, sort))
+        s = Session()
+        return s.registry(page=page, query=_q(params, "query"), sort=sort, least=_q(params, "least") == "1")
+
     if kind == "dyndns":
         provider = _q(params, "provider").lower()
         if provider not in {"duckdns", "dynv6", "dynu", "noip", "changeip", "desec"}:
@@ -736,3 +747,50 @@ def handler(event, context):  # type: ignore[no-untyped-def]
         "headers": {"content-type": "application/json", "access-control-allow-origin": "*"},
         "body": json.dumps(payload),
     }
+
+
+# ── stdlib self-host server (run it on your own box) ─────────────────────────
+
+
+def _serve(port: int) -> None:  # pragma: no cover — manual-run helper
+    """Serve the relay from any machine with Python 3, no dependencies.
+    Usage: python3 api/freedns.py [port]   (default port 8787)
+    Then put http://<host>:<port>/api/freedns into the ⚡ FreeDNS panel."""
+    import http.server
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — stdlib interface
+            from urllib.parse import parse_qs, urlparse
+
+            qs = urlparse(self.path).query
+            params = {k: v[0] for k, v in parse_qs(qs).items()}
+            if params.get("kind", "").lower() == "webip":
+                fwd = self.headers.get("x-forwarded-for", "")
+                params["ip"] = str(fwd).split(",")[0].strip() or (self.client_address[0] or "")
+            try:
+                payload = handle_query(params)
+                status = 200
+            except Exception as exc:  # noqa: BLE001
+                payload = {"error": f"{type(exc).__name__}: {exc}"}
+                status = 502
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("access-control-allow-origin", "*")
+            self.send_header("cache-control", "no-store")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args) -> None:  # type: ignore[no-untyped-def]
+            pass  # keep the console clean
+
+    srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), _Handler)
+    print(f"FreeDNS relay on http://0.0.0.0:{port}/api/freedns  (Ctrl-C to stop)")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    _serve(int(sys.argv[1]) if len(sys.argv) > 1 else 8787)

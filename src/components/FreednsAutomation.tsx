@@ -15,7 +15,7 @@
 // repointed at a new IP (dyn-DNS style) with one captcha.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { freedns, FreednsDomain, FreednsRecord } from "../lib/freedns";
+import { customRelayBase, freedns, setCustomRelayBase, FreednsDomain, FreednsRecord } from "../lib/freedns";
 
 type Stage = "idle" | "signup" | "login" | "registry" | "records";
 
@@ -71,13 +71,36 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
   const [creds, setCreds] = useState<{ user: string; pass: string; sid: string } | null>(null);
   const autoFilledIp = useRef(false);
 
+  // self-hosted relay + public registry browse (the no-relay fallbacks)
+  const [relayInput, setRelayInput] = useState(customRelayBase);
+  const [pubOpen, setPubOpen] = useState(false);
+  const [pubDomains, setPubDomains] = useState<FreednsDomain[]>([]);
+  const [pubPage, setPubPage] = useState(1);
+  const [pubTotal, setPubTotal] = useState(0);
+  const [pubQuery, setPubQuery] = useState("");
+  const [pubLeast, setPubLeast] = useState(false);
+  const [pubVia, setPubVia] = useState<"relay" | "public">("relay");
+  const [pickedPub, setPickedPub] = useState<FreednsDomain | null>(null);
+  const [manualSub, setManualSub] = useState("");
+
   useEffect(() => {
     if (!open || relayUp !== null) return;
     let on = true;
+    setBusy("Checking for a FreeDNS relay…");
     freedns
-      .ping()
-      .then((ok) => on && setRelayUp(ok))
-      .catch(() => on && setRelayUp(false));
+      .pingBase()
+      .then((base) => {
+        if (on) {
+          setRelayUp(!!base);
+          setBusy(null);
+        }
+      })
+      .catch(() => {
+        if (on) {
+          setRelayUp(false);
+          setBusy(null);
+        }
+      });
     return () => {
       on = false;
     };
@@ -176,6 +199,30 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
       setBusy(null);
     }
   }, []);
+
+  /** Public registry browse — works with zero relay (relay's sessionless
+   * registrybrowse op first, then a public CORS relay + client-side parse). */
+  const loadPub = useCallback(async (page: number, query = "", least = false) => {
+    setBusy(least ? "Loading the least-used public domains…" : query ? "Searching the public registry…" : "Loading the public registry…");
+    setError(null);
+    try {
+      const r = await freedns.registryBrowse(page, query, { least });
+      setPubDomains(r.domains);
+      setPubPage(page);
+      setPubTotal(r.total);
+      setPubVia(r.via);
+    } catch (e) {
+      setError(`public registry: ${errMsg(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  /** Save a self-hosted relay URL and re-check it. */
+  function applyRelay() {
+    setCustomRelayBase(relayInput);
+    setRelayUp(null); // the ping effect re-runs against the new base
+  }
 
   async function loadRecords(useSid: string) {
     setBusy("Loading your records…");
@@ -282,14 +329,66 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
             handful of hosts — those subdomains are the least burned.
             {relayUp === false && (
               <span className="ml-1 text-warn">
-                The relay (api/freedns.py) isn't reachable on this host — deploy it alongside the site
-                to automate; manual BYOD entry still works.
+                The relay (api/freedns.py) isn't reachable on this host — manual BYOD entry still
+                works, and the options below cover the rest.
               </span>
             )}
           </p>
 
           {error && <p className="text-[11px] text-danger">✗ {error}</p>}
           {busy && <p className="text-[11px] text-accent">{busy}</p>}
+
+          {relayUp === false && (
+            <div className="space-y-2 rounded-md border border-warn/30 bg-warn/5 p-2.5">
+              <p className="text-[11px] leading-relaxed text-warn">
+                This deploy is static-only (no server-side Python), so full automation needs a
+                reachable relay:
+              </p>
+              <ol className="list-decimal space-y-1.5 pl-4 text-[11px] leading-relaxed text-slate-400">
+                <li>
+                  <span className="font-semibold text-slate-300">Self-host the relay</span> — copy{" "}
+                  <span className="font-mono text-slate-300">api/freedns.py</span> to any always-on
+                  box and run{" "}
+                  <span className="font-mono text-slate-300">python3 api/freedns.py</span> (stdlib
+                  only, listens on 0.0.0.0:8787, CORS open). Paste its URL below — signup, registry,
+                  record creation and DynDNS all flow through it.
+                </li>
+                <li>
+                  <span className="font-semibold text-slate-300">Skip the relay</span> — browse the
+                  public registry below (needs nothing), use the 🪄 wildcard composer / manual BYOD
+                  entry, and note DuckDNS &amp; ChangeIP updates work via public CORS relays.
+                </li>
+              </ol>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <input
+                  value={relayInput}
+                  onChange={(e) => setRelayInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && applyRelay()}
+                  placeholder="http://74.208.64.80:8787/api/freedns"
+                  spellCheck={false}
+                  className="input-base min-w-[16rem] flex-1 px-2 py-1 font-mono text-xs"
+                  title="Base URL of your self-hosted api/freedns.py"
+                />
+                <button onClick={applyRelay} disabled={busy !== null} className="btn-secondary !px-2.5 !py-1 text-[10px]">
+                  Apply relay
+                </button>
+                {customRelayBase() && (
+                  <button
+                    onClick={() => {
+                      setCustomRelayBase("");
+                      setRelayInput("");
+                      setRelayUp(null);
+                    }}
+                    disabled={busy !== null}
+                    className="text-[10px] text-slate-500 hover:text-danger"
+                    title="Forget the saved custom relay"
+                  >
+                    remove saved
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {!creds && (
             <div className="flex flex-wrap gap-1.5">
@@ -315,7 +414,148 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
               >
                 🔑 Log in
               </button>
+              <button
+                onClick={() => {
+                  const next = !pubOpen;
+                  setPubOpen(next);
+                  if (!next) setPickedPub(null);
+                  else if (pubDomains.length === 0) void loadPub(1);
+                }}
+                disabled={busy !== null}
+                className="btn-secondary !px-3 !py-1.5 text-[11px]"
+                title="Browse the 21k+ shared domains with no relay and no login — parsed in your browser"
+              >
+                🌐 Public registry {pubOpen ? "▲" : "▼"}
+              </button>
               {creds && null}
+            </div>
+          )}
+
+          {!creds && pubOpen && (
+            <div className="rounded-md border border-ink-600 bg-ink-900/60 p-2.5">
+              <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                <input
+                  value={pubQuery}
+                  onChange={(e) => setPubQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && void loadPub(1, pubQuery.trim(), pubLeast)}
+                  placeholder="search 21k+ shared domains (Enter)"
+                  spellCheck={false}
+                  className="input-base min-w-[12rem] flex-1 px-2 py-1 font-mono text-xs"
+                />
+                <button onClick={() => void loadPub(1, pubQuery.trim(), pubLeast)} disabled={busy !== null} className="btn-secondary !px-2.5 !py-1 text-[10px]">
+                  Search
+                </button>
+                <button
+                  onClick={() => {
+                    setPubLeast(false);
+                    void loadPub(1, pubQuery.trim(), false);
+                  }}
+                  disabled={busy !== null || !pubLeast}
+                  className={`chip text-[10px] ${!pubLeast ? "border-accent/50 text-accent-soft" : "text-slate-500 hover:border-accent/40"}`}
+                  title="Default FreeDNS order — the biggest shared domains first"
+                >
+                  ★ most popular
+                </button>
+                <button
+                  onClick={() => {
+                    setPubLeast(true);
+                    void loadPub(1, pubQuery.trim(), true);
+                  }}
+                  disabled={busy !== null || pubLeast}
+                  className={`chip text-[10px] ${pubLeast ? "border-accent/50 text-accent-soft" : "text-slate-500 hover:border-accent/40"}`}
+                  title="Tail of FreeDNS's popularity sort — domains with only a handful of hosts"
+                >
+                  ↓ least popular
+                </button>
+                <span className="ml-auto font-mono text-[10px] text-slate-500">
+                  page {pubPage} · {pubTotal.toLocaleString()} domains
+                </span>
+              </div>
+              {pubVia === "public" && (
+                <p className="mb-1 text-[10px] text-slate-500">
+                  <span
+                    className="rounded bg-ink-800 px-1 py-0.5 font-mono text-[9px] text-slate-400"
+                    title="Fetched through a public CORS relay and parsed in your browser — no api/freedns.py involved"
+                  >
+                    via public relay
+                  </span>{" "}
+                  no login needed — pick a domain, then compose the host manually below.
+                </p>
+              )}
+              {pubLeast && (
+                <p className="mb-1 text-[10px] leading-relaxed text-slate-500">
+                  Counting from the least-used end: page 1 is the registry's very last page (domains with 3–4 hosts).
+                </p>
+              )}
+              <div className="grid max-h-40 grid-cols-1 gap-1 overflow-y-auto sm:grid-cols-2">
+                {pubDomains.map((d) => (
+                  <button
+                    key={d.id}
+                    onClick={() => setPickedPub(d)}
+                    title={`Use ${d.domain} — ${d.status}, ${d.hosts.toLocaleString()} hosts`}
+                    className={`rounded border px-2 py-1 text-left font-mono text-[11px] transition ${
+                      pickedPub?.id === d.id
+                        ? "border-accent/60 bg-accent/10 text-accent-soft"
+                        : "border-ink-600 bg-ink-900 text-slate-400 hover:border-accent/40 hover:text-accent-soft"
+                    }`}
+                  >
+                    {d.domain}
+                    <span className="ml-1 text-[9px] text-slate-600">{d.hosts.toLocaleString()} hosts</span>
+                  </button>
+                ))}
+              </div>
+              <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-500">
+                <button
+                  onClick={() => void loadPub(Math.max(1, pubPage - 1), pubQuery.trim(), pubLeast)}
+                  disabled={pubPage <= 1 || busy !== null}
+                  className="hover:text-accent"
+                >
+                  ← prev
+                </button>
+                <button
+                  onClick={() => void loadPub(pubPage + 1, pubQuery.trim(), pubLeast)}
+                  disabled={pubPage >= Math.ceil(pubTotal / 100) || busy !== null}
+                  className="hover:text-accent"
+                >
+                  next →
+                </button>
+              </div>
+              {pickedPub && (
+                <div className="mt-2 rounded border border-accent/30 bg-ink-900 p-2">
+                  <p className="text-[11px] font-semibold text-slate-300">
+                    Compose a host on <span className="font-mono text-accent-soft">{pickedPub.domain}</span>
+                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <input
+                      value={manualSub}
+                      onChange={(e) => setManualSub(e.target.value.replace(/[^a-z0-9-]/gi, "").slice(0, 30))}
+                      placeholder="yourname"
+                      spellCheck={false}
+                      className="input-base w-32 px-2 py-1 font-mono text-xs"
+                    />
+                    <span className="font-mono text-[11px] text-accent">
+                      {manualSub.trim() || "yourname"}.{pickedPub.domain}
+                    </span>
+                    <button
+                      onClick={() => copyText(`${manualSub.trim() || "yourname"}.${pickedPub.domain}`)}
+                      className="text-[10px] text-slate-500 hover:text-accent"
+                    >
+                      copy
+                    </button>
+                    <button
+                      onClick={() => onAdopt(`${manualSub.trim() || "yourname"}.${pickedPub.domain}`)}
+                      className="text-[10px] text-accent hover:underline"
+                      title="Put this host in the BYOD box"
+                    >
+                      use in BYOD box
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                    Create that sub on freedns.afraid.org (Subdomains → add) pointed at your IP — with a relay
+                    reachable, the signup flow above does it in one click instead.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

@@ -61,7 +61,11 @@ The BYOD section embeds an **automator for freedns.afraid.org** — the same flo
 5. **Record → BYOD** — create `yourname.<domain> A <your IP>` (IP pre-filled with the browser's public IP; AAAA/CNAME supported). The new host is **adopted straight into the BYOD box**, so links come out on it immediately
 6. **Dynamic DNS** — existing records are listed and can be **repointed** at a new IP with one captcha
 
-FreeDNS sends no CORS headers, so the browser talks to `api/freedns.py` — a **stdlib-only** Python relay deployed alongside the site (same shape as the Filter Checker's `api/filter.py`, ASGI + Lambda handlers, in-memory sessions). Captchas are the only manual step; FreeDNS requires them for signup, login anomalies, and every record change. If the relay isn't deployed on the current host, the automator says so and manual BYOD entry keeps working.
+FreeDNS sends no CORS headers, so the browser talks to `api/freedns.py` — a **stdlib-only** Python relay (same shape as the Filter Checker's `api/filter.py`, ASGI + Lambda handlers, in-memory sessions). Captchas are the only manual step; FreeDNS requires them for signup, login anomalies, and every record change. The client tries **three relay tiers**, so a static-only deploy (where `/api/*` falls through to the SPA) degrades gracefully instead of breaking:
+
+1. **Same-origin relay** — `api/freedns.py` deployed alongside the site, when the host runs Python.
+2. **Custom relay URL** — when the panel reports the relay isn't reachable, paste the base URL of a self-hosted copy into the ⚡ panel's field (it persists in localStorage and is tried first). Self-hosting is one command with zero dependencies: copy `api/freedns.py` to any always-on box and run `python3 api/freedns.py` — it serves JSON with open CORS on `0.0.0.0:8787` (pass a port as the first argument).
+3. **Public CORS relays** — for the sessionless parts, no relay needed at all: the **public registry browser** (🌐 button) fetches freedns.afraid.org's registry through a CORS-open relay (r.jina.ai → allorigins, same as the Filter Checker) and parses it in your browser — including the least-popular tail pages — and **DuckDNS & ChangeIP** updates (pure-GET APIs) also go through it. Ops that need the FreeDNS login session (signup, record create/update) still require tier 1 or 2; the 🪄 wildcard composer and manual BYOD entry never need one.
 
 #### 🧰 More BYOD automators — every other provider kind
 
