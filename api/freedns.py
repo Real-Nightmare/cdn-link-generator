@@ -19,6 +19,10 @@ Operations
   kind=newmail                                 -> {"email", "msid"} temp inbox
   kind=signup&sid=&first=&last=&user=&pass=&email=&captcha=<code>
   kind=activate&code=<activation code>         (manual fallback)
+  kind=mailcheck&msid=<mail sid>[&sid=]        -> {"found": bool, "code"}: one
+                                               one-shot inbox poll for the
+                                               activation mail (the browser
+                                               loops this with a live UI)
   kind=autoactivate&sid=<freedns sid>&msid=<mail sid>
                                                -> waits for the FreeDNS
                                                   activation mail in the temp
@@ -451,28 +455,39 @@ def new_mailbox() -> Dict[str, str]:
     return {"email": email, "msid": sid}
 
 
+def _find_activation(msid: str, session: Session) -> Optional[str]:
+    """One pass over the temp inbox: when a FreeDNS activation mail is there,
+    open its link with the FreeDNS session and return the code. Returns None
+    when nothing usable has arrived yet — the caller polls again."""
+    data = _greq({"f": "check_email", "seq": "0", "sid_token": msid})
+    for msg in data.get("list", []):
+        sender = str(msg.get("mail_from", ""))
+        if "afraid.org" not in sender.lower():
+            continue
+        detail = _greq(
+            {"f": "fetch_email", "email_id": str(msg.get("mail_id")), "sid_token": msid}
+        )
+        body = str(detail.get("mail_body", ""))
+        # The link is /signup/activate.php?<code> — the code is
+        # everything after the '?', per domain92/freedns-client.
+        m = re.search(r"activate\.php\?([A-Za-z0-9=&_%-]+)", body)
+        if not m:
+            continue
+        code = m.group(1).rstrip("&=")
+        session.activate(code)
+        return code
+    return None
+
+
 def _mail_wait_and_activate(msid: str, session: Session, tries: int = 24) -> str:
-    """Poll the temp inbox for the FreeDNS activation mail and open its link
-    with the FreeDNS session. Returns the activation code that worked."""
+    """Poll until the activation mail lands, opening its link. The browser UI
+    no longer parks on this (it loops the one-shot kind=mailcheck op instead);
+    it stays for kind=autoactivate and self-host/CLI one-shot use."""
     last_err = ""
     for _ in range(tries):
         try:
-            data = _greq({"f": "check_email", "seq": "0", "sid_token": msid})
-            for msg in data.get("list", []):
-                sender = str(msg.get("mail_from", ""))
-                if "afraid.org" not in sender.lower():
-                    continue
-                detail = _greq(
-                    {"f": "fetch_email", "email_id": str(msg.get("mail_id")), "sid_token": msid}
-                )
-                body = str(detail.get("mail_body", ""))
-                # The link is /signup/activate.php?<code> — the code is
-                # everything after the '?', per domain92/freedns-client.
-                m = re.search(r"activate\.php\?([A-Za-z0-9=&_%-]+)", body)
-                if not m:
-                    continue
-                code = m.group(1).rstrip("&=")
-                session.activate(code)
+            code = _find_activation(msid, session)
+            if code:
                 return code
             time.sleep(5)
         except Exception as exc:  # noqa: BLE001 — keep polling on transient errors
@@ -575,6 +590,25 @@ def handle_query(params: Dict[str, str]) -> Dict[str, Any]:
 
     if kind == "newmail":
         return new_mailbox()
+
+    if kind == "mailcheck":
+        # One-shot inbox poll — the browser loops over this (live countdown,
+        # cancellable) instead of parking on the old blocking autoactivate
+        # request for up to two minutes. `sid` is optional: pass it to reuse
+        # the exact FreeDNS session that signed up; without it a throwaway
+        # session opens the activation link (activation needs no login).
+        msid = _q(params, "msid")
+        if not msid:
+            raise FreednsError("mailcheck needs msid (the temp-mail session id)")
+        fsid = _q(params, "sid")
+        s = _get_session(fsid) if fsid else Session()
+        try:
+            code = _find_activation(msid, s)
+        except FreednsError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — transient mail-service errors
+            return {"found": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"found": code is not None, "code": code or ""}
 
     if kind == "autoactivate":
         sid = _q(params, "sid")

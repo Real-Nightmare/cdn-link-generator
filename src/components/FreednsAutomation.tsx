@@ -54,6 +54,14 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
   const [tempEmail, setTempEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  /** Own-inbox signup — temp inboxes are often blocked, so offer the real thing. */
+  const [useOwnEmail, setUseOwnEmail] = useState(false);
+  const [ownEmail, setOwnEmail] = useState("");
+  /** Paste-the-code fallback (own inbox, or when the temp wait fails). */
+  const [activationCode, setActivationCode] = useState("");
+  /** Seconds left on the activation-wait countdown; null = not waiting. */
+  const [waitSec, setWaitSec] = useState<number | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
   // registry / records state
   const [domains, setDomains] = useState<FreednsDomain[]>([]);
@@ -65,11 +73,21 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
   const [regLeast, setRegLeast] = useState(false);
   const [pickedDomain, setPickedDomain] = useState<FreednsDomain | null>(null);
   const [subName, setSubName] = useState("");
+  /** Batch mode: more sub names, one per line — after each create the next
+   * name + a fresh (pre-loaded) captcha are ready; one captcha per record is
+   * FreeDNS's rule, everything between records is automated away. */
+  const [queueNames, setQueueNames] = useState("");
+  const [created, setCreated] = useState<string[]>([]);
   const [recordType, setRecordType] = useState<"A" | "AAAA" | "CNAME">("A");
   const [dest, setDest] = useState("");
   const [records, setRecords] = useState<FreednsRecord[]>([]);
   const [creds, setCreds] = useState<{ user: string; pass: string; sid: string } | null>(null);
   const autoFilledIp = useRef(false);
+  /** Latest sid readable from non-reactive helpers (async loops, manual activation). */
+  const sidRef = useRef("");
+  useEffect(() => {
+    sidRef.current = sid;
+  }, [sid]);
 
   // self-hosted relay + public registry browse (the no-relay fallbacks)
   const [relayInput, setRelayInput] = useState(customRelayBase);
@@ -136,9 +154,31 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
 
   async function doSignup() {
     if (!sid || !captchaCode.trim() || !username.trim() || !password || busy) return;
-    setBusy("Creating temp inbox…");
     setError(null);
+    setInfo(null);
+    if (useOwnEmail && !ownEmail.trim().includes("@")) {
+      setError("Enter a real email — that's where FreeDNS sends the activation code.");
+      return;
+    }
     try {
+      if (useOwnEmail) {
+        // No temp inbox: FreeDNS mails the code to the user's real address;
+        // they paste it below and activate() finishes the flow.
+        setBusy("Signing up on freedns.afraid.org…");
+        await freedns.signup({
+          sid,
+          user: username.trim(),
+          pass: password,
+          email: ownEmail.trim(),
+          captcha: captchaCode.trim(),
+        });
+        setBusy(null);
+        setInfo(
+          `Account requested. Open ${ownEmail.trim()}, copy the code from the activate.php link, paste it below and confirm.`,
+        );
+        return;
+      }
+      setBusy("Creating temp inbox…");
       const mail = await freedns.newmail();
       setTempEmail(mail.email);
       setBusy("Signing up on freedns.afraid.org…");
@@ -149,8 +189,31 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
         email: mail.email,
         captcha: captchaCode.trim(),
       });
-      setBusy("Waiting for the activation mail (opens automatically)…");
-      await freedns.autoactivate(sid, mail.msid);
+      // Client-side poll loop: the old flow parked on a 3-minute blocking
+      // relay request; now the inbox is re-checked every few seconds with a
+      // live countdown, and a paste-the-code fallback covers dead inboxes.
+      setBusy("Waiting for the activation mail…");
+      for (let left = 150; left > 0; left--) {
+        setWaitSec(left);
+        try {
+          const chk = await freedns.mailcheck(mail.msid, sid);
+          if (chk.found) break;
+        } catch {
+          /* transient relay/mail hiccup — keep polling */
+        }
+        if (left === 1) {
+          // Mail never showed up — offer the manual code paste instead of
+          // failing after minutes of silence.
+          setBusy(null);
+          setWaitSec(null);
+          setInfo(
+            `No mail after 2.5 min — check ${mail.email} yourself and paste the activate.php code below, or sign up with your own email.`,
+          );
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      setWaitSec(null);
       setBusy("Logging in…");
       await freedns.login(sid, username.trim(), password);
       setCreds({ user: username.trim(), pass: password, sid });
@@ -160,8 +223,34 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
       setCaptchaCode("");
     } catch (e) {
       setError(errMsg(e));
+      setWaitSec(null);
       // Wrong captcha is the common failure — offer a fresh one in place.
       void solveCaptcha(stage === "records" ? sid : undefined);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Manual activation: user pasted the code from their own (or the temp)
+   * inbox — finish signup from there. */
+  async function doActivate() {
+    if (!activationCode.trim() || !username.trim() || !password || busy) return;
+    setBusy("Activating…");
+    setError(null);
+    setInfo(null);
+    const useSid = sidRef.current;
+    try {
+      await freedns.activate(activationCode.trim());
+      setBusy("Logging in…");
+      await freedns.login(useSid, username.trim(), password);
+      setCreds({ user: username.trim(), pass: password, sid: useSid });
+      await loadRegistry(useSid, 1, "", regLeast);
+      setStage("registry");
+      setCaptchaImg("");
+      setCaptchaCode("");
+      setActivationCode("");
+    } catch (e) {
+      setError(`${errMsg(e)} — if login wants a captcha, solve it and use Log in.`);
     } finally {
       setBusy(null);
     }
@@ -237,6 +326,22 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
     }
   }
 
+  /** After a successful create: pull the next queued name into the sub field
+   * and pre-load a fresh captcha, so the next record only needs its letters
+   * typed. One captcha per record save is FreeDNS's rule — everything else
+   * between records is automated away. */
+  function advanceQueue() {
+    const justMade = subName.trim().toLowerCase();
+    const rest = queueNames
+      .split(/[\n,;]+/)
+      .map((s) => s.trim().replace(/[^a-z0-9-]/gi, "").slice(0, 30))
+      .filter((s) => s && s.toLowerCase() !== justMade);
+    setQueueNames(rest.slice(1).join("\n"));
+    if (rest[0]) setSubName(rest[0]);
+    setCaptchaCode("");
+    void solveCaptcha(creds?.sid);
+  }
+
   async function doCreate() {
     if (!creds || !pickedDomain || !subName.trim() || !cleanDest(dest) || busy) return;
     if (!captchaCode.trim()) {
@@ -257,11 +362,9 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
       });
       const host = r.created || `${subName.trim()}.${pickedDomain.domain}`;
       onAdopt(host);
-      setPickedDomain(null);
-      setSubName("");
-      setCaptchaCode("");
-      setCaptchaImg("");
-      await loadRecords(creds.sid);
+      setCreated((c) => (c.includes(host) ? c : [...c, host]));
+      advanceQueue(); // next name ready + fresh captcha already loading
+      void loadRecords(creds.sid);
     } catch (e) {
       setError(errMsg(e));
       setCaptchaCode("");
@@ -294,6 +397,7 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
       setCaptchaImg("");
       await loadRecords(creds.sid);
       onAdopt(rec.subdomain); // already in the box? adoption is a no-op then
+      void solveCaptcha(creds.sid); // pre-load the next record's captcha
     } catch (e) {
       setError(errMsg(e));
       void solveCaptcha(creds.sid);
@@ -336,6 +440,7 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
           </p>
 
           {error && <p className="text-[11px] text-danger">✗ {error}</p>}
+          {info && <p className="text-[11px] leading-relaxed text-warn">ℹ {info}</p>}
           {busy && <p className="text-[11px] text-accent">{busy}</p>}
 
           {relayUp === false && (
@@ -596,14 +701,60 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
                   className="input-base px-2 py-1 font-mono text-xs"
                 />
               </div>
-              {stage === "signup" && tempEmail && (
+              {stage === "signup" && (
+                <div className="flex items-center gap-2">
+                  <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-slate-400" title="Temp inboxes are often blocked by FreeDNS — a real inbox always receives the mail">
+                    <input
+                      type="checkbox"
+                      checked={useOwnEmail}
+                      onChange={(e) => setUseOwnEmail(e.target.checked)}
+                      className="accent-accent-strong"
+                    />
+                    own email
+                  </label>
+                  {useOwnEmail && (
+                    <input
+                      value={ownEmail}
+                      onChange={(e) => setOwnEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      spellCheck={false}
+                      className="input-base flex-1 px-2 py-1 font-mono text-xs"
+                    />
+                  )}
+                </div>
+              )}
+              {stage === "signup" && !useOwnEmail && tempEmail && (
                 <p className="font-mono text-[10px] text-slate-500">
-                  activation mail → {tempEmail} (handled automatically)
+                  activation mail → {tempEmail} (polled automatically, no inbox visit)
+                </p>
+              )}
+              {stage === "signup" && waitSec !== null && (
+                <p className="text-[11px] text-accent">
+                  ⏳ checking the temp inbox… {waitSec}s left (stuck? paste the code below)
                 </p>
               )}
               <button onClick={stage === "login" ? doLogin : doSignup} disabled={busy !== null} className="btn-primary w-full py-1.5 text-xs">
                 {stage === "login" ? "Log in" : "Create account & activate"}
               </button>
+              {stage === "signup" && (
+                <div className="flex gap-1.5">
+                  <input
+                    value={activationCode}
+                    onChange={(e) => setActivationCode(e.target.value)}
+                    placeholder="manual fallback: paste the activate.php code here"
+                    spellCheck={false}
+                    className="input-base flex-1 px-2 py-1 font-mono text-xs"
+                  />
+                  <button
+                    onClick={doActivate}
+                    disabled={busy !== null || !activationCode.trim()}
+                    className="btn-secondary shrink-0 !px-2.5 !py-1 text-[10px]"
+                    title="Finish signup from the code in the activation mail (own inbox, or the temp one)"
+                  >
+                    activate
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -692,6 +843,32 @@ export function FreednsAutomation({ onAdopt }: { onAdopt: (host: string) => void
                       </button>
                     )}
                   </p>
+                )}
+                <textarea
+                  value={queueNames}
+                  onChange={(e) => setQueueNames(e.target.value)}
+                  rows={2}
+                  placeholder={"batch queue (optional) — one name per line; after each create the next name loads automatically:\nlinkbox-2\nlinkbox-3"}
+                  spellCheck={false}
+                  className="input-base resize-y px-2 py-1 font-mono text-[11px]"
+                />
+                <p className="mt-0.5 text-[10px] leading-relaxed text-slate-500">
+                  Each create pre-loads the next name + a fresh captcha — you only type the new
+                  letters. One captcha per record is FreeDNS's own rule (free accounts: 5
+                  shared-domain subdomains; need more? the 🪄 wildcard composer below mints
+                  unlimited captcha-free hosts).
+                </p>
+                {created.length > 0 && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1">
+                    {created.map((h) => (
+                      <span key={h} className="chip border-accent/30 text-[10px] text-accent-soft">
+                        ✓ {h}
+                      </span>
+                    ))}
+                    <button onClick={() => copyText(created.join("\n"))} className="text-[10px] text-slate-500 hover:text-accent">
+                      copy all
+                    </button>
+                  </div>
                 )}
                 {captchaImg && (
                   <div className="mt-1.5 flex items-center gap-2">

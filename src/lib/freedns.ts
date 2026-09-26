@@ -333,6 +333,15 @@ export const freedns = {
     return call<void>({ kind: "activate", code }).then(() => undefined);
   },
 
+  /** One-shot temp-inbox poll: has the FreeDNS activation mail arrived yet?
+   * The signup UI loops this (live countdown, cancellable) instead of parking
+   * on the blocking autoactivate request for minutes. */
+  mailcheck(msid: string, sid?: string): Promise<{ found: boolean; code: string }> {
+    return call<{ found: boolean; code?: string }>(
+      sid ? { kind: "mailcheck", msid, sid } : { kind: "mailcheck", msid },
+    ).then((r) => ({ found: !!r.found, code: r.code || "" }));
+  },
+
   /** Auto-activate: wait for the FreeDNS mail in the temp inbox, open it. */
   autoactivate(sid: string, msid: string): Promise<void> {
     return call<void>({ kind: "autoactivate", sid, msid }, 180_000).then(() => undefined);
