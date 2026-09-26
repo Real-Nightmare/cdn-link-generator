@@ -3,6 +3,9 @@
 // the 🧰 BYOD automator toolbox, and confirm graceful relay-absence.
 import { chromium } from "playwright-core";
 
+// BASE_URL lets the same check run against production:
+//   BASE_URL=https://linkgen.freebuff.app node scripts/verify-freedns.mjs
+const BASE = process.env.BASE_URL || "http://localhost:3000";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const errors = [];
@@ -16,7 +19,7 @@ page.on("console", (m) => {
   errors.push("console: " + m.text());
 });
 
-await page.goto("http://localhost:3000/#/generate", { waitUntil: "load" });
+await page.goto(`${BASE}/#/generate`, { waitUntil: "load" });
 await page.waitForTimeout(2500);
 
 const state = await page.evaluate(() => {
