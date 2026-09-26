@@ -522,6 +522,12 @@ def _q(params: Dict[str, str], key: str, default: str = "") -> str:
 def handle_query(params: Dict[str, str]) -> Dict[str, Any]:
     kind = _q(params, "kind").lower()
 
+    if not kind:
+        # Plain root hits (container-platform health checks probe "/") get a
+        # 200 liveness reply so the service isn't marked unhealthy and
+        # restart-looped. Every real op names itself via kind=.
+        return {"ok": True, "service": "freedns-relay"}
+
     if kind == "ping":
         return {"ok": True}
 
@@ -791,6 +797,9 @@ def _serve(port: int) -> None:  # pragma: no cover — manual-run helper
 
 
 if __name__ == "__main__":  # pragma: no cover
+    import os
     import sys
 
-    _serve(int(sys.argv[1]) if len(sys.argv) > 1 else 8787)
+    # argv wins, then $PORT (Koyeb / HF Spaces / Render all inject it), then
+    # 8787 for the run-it-on-your-own-box case.
+    _serve(int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT") or 8787))

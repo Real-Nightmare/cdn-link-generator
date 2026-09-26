@@ -1,0 +1,4 @@
+# Keep the relay image tiny — the host only needs api/freedns.py.
+*
+!api/
+!api/freedns.py
