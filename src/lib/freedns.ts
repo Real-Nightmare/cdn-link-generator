@@ -79,17 +79,24 @@ function relayBases(): string[] {
   return custom ? [custom, FREEDNS_API] : [FREEDNS_API];
 }
 
-/** Public CORS relays (GET-only proxies) — same ones the Filter Checker uses. */
-const RELAY_TIMEOUT_MS = 20_000;
-async function publicRelayText(url: string, timeoutMs = RELAY_TIMEOUT_MS): Promise<string> {
+/** Public CORS relays (GET-only proxies) — same ones the Filter Checker uses.
+ * Both proxy the raw bytes (the registry's HTML, or the plain dyndns2 reply).
+ * Live-checked 2026-09: they occasionally 522 together (Cloudflare blip —
+ * retry later); the registry browser then falls back to r.jina.ai's markdown
+ * rendering instead (see parseRegistryMarkdown), and dyndns ops surface a
+ * clear "proxies are down" error. */
+const RELAY_TIMEOUT_MS = 8_000; // per attempt — dead proxies must not stall the panel
+async function publicRelayRaw(url: string, timeoutMs = RELAY_TIMEOUT_MS): Promise<string> {
   const attempts: Array<() => Promise<string>> = [
     () =>
-      fetch(`https://r.jina.ai/${url}`, { signal: AbortSignal.timeout(timeoutMs) }).then((res) => {
+      fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, {
+        signal: AbortSignal.timeout(timeoutMs),
+      }).then((res) => {
         if (!res.ok) throw new Error(`public relay ${res.status}`);
         return res.text();
       }),
     () =>
-      fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, {
+      fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, {
         signal: AbortSignal.timeout(timeoutMs),
       }).then((res) => {
         if (!res.ok) throw new Error(`public relay ${res.status}`);
@@ -105,6 +112,17 @@ async function publicRelayText(url: string, timeoutMs = RELAY_TIMEOUT_MS): Promi
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("all public relays failed");
+}
+
+/** r.jina.ai's readable-text rendering — the registry rows survive as markdown
+ * links, so browsing still works when the raw proxies are down (live-checked:
+ * 100 rows/page, `Page 1 of 209` in the title carries the page count). */
+async function publicRelayJinaMarkdown(url: string, timeoutMs = 30_000): Promise<string> {
+  const res = await fetch(`https://r.jina.ai/${encodeURIComponent(url)}`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`public relay jina ${res.status}`);
+  return res.text();
 }
 
 /** png → <img src> data URL. */
@@ -202,6 +220,45 @@ export function parseRegistryHtml(page: string): { total: number; pages: number;
     if (tm) total = parseInt(tm[1].replace(/,/g, ""), 10);
   }
   return { total, pages: total ? Math.max(1, Math.ceil(total / 100)) : 1, domains };
+}
+
+/** Companion parser for r.jina.ai's markdown rendering of the registry page
+ * (used when the raw-HTML proxies are down). The domain rows survive as
+ * `[name](https://freedns.afraid.org/subdomain/edit.php?edit_domain_id=N)`
+ * links followed by the `(N hosts in use)` / `public|private` cells; the page
+ * count comes from the `Title: Domain Registry : Page X of Y` line. */
+export function parseRegistryMarkdown(md: string): { total: number; pages: number; domains: FreednsDomain[] } {
+  const links: Array<{ name: string; id: number; start: number; end: number }> = [];
+  for (const m of md.matchAll(/\[([^\]]+)\]\([^)]*edit_domain_id=(\d+)[^)]*\)/gi)) {
+    links.push({ name: m[1], id: parseInt(m[2], 10), start: m.index, end: m.index + m[0].length });
+  }
+  const domains: FreednsDomain[] = [];
+  for (let i = 0; i < links.length; i++) {
+    // Markdown emphasis from FreeDNS's red match highlight (**mooo**.com) and
+    // any stray entity — strip to the bare domain, then require domain shape.
+    const name = decodeHtml(links[i].name.replace(/[*_`]/g, "")).trim().toLowerCase();
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(name)) continue;
+    // Cells for this row live between this link and the next row's link.
+    const stop = i + 1 < links.length ? links[i + 1].start : Math.min(md.length, links[i].end + 400);
+    const text = md.slice(links[i].end, stop).replace(/\[[^\]]*\]\([^)]*\)/g, " ");
+    const hm = text.match(/\(([\d,]+)\s+hosts?/);
+    const sm = text.match(/\b(public|private)\b/i);
+    domains.push({
+      domain: name,
+      id: links[i].id,
+      hosts: hm ? parseInt(hm[1].replace(/,/g, ""), 10) : 0,
+      status: sm ? sm[1].toLowerCase() : "",
+    });
+  }
+  let pages = 0;
+  const pm = md.match(/Page\s+\d+\s+of\s+(\d+)/i);
+  if (pm) pages = parseInt(pm[1], 10);
+  let total = 0;
+  const tm = md.match(/Showing\s*[\d,]+\s*-\s*[\d,]+\s*of\s*([\d,]+)\s*total/i);
+  if (tm) total = parseInt(tm[1].replace(/,/g, ""), 10);
+  if (!total && pages) total = pages * 100; // close enough for the counter chip
+  if (!pages && total) pages = Math.max(1, Math.ceil(total / 100));
+  return { total, pages: pages || 1, domains };
 }
 
 export interface RegistryResult {
@@ -320,25 +377,29 @@ export const freedns = {
     // Public page under sort=5 runs most→least popular; least-mode maps to the
     // tail pages exactly like the relay does (page 1 of the reversed count =
     // the registry's last page).
-    const qs = new URLSearchParams({ page: "1", sort: String(sort) });
-    if (query) qs.set("q", query);
-    let fetchPage = page;
-    if (least) {
-      const first = parseRegistryHtml(await publicRelayText(`${FREEDNS_PUBLIC_PAGE}?${qs.toString()}`));
-      fetchPage = Math.max(1, first.pages - page + 1);
-      qs.set("page", String(fetchPage));
-    } else {
-      qs.set("page", String(page));
-    }
-    const parsed = parseRegistryHtml(await publicRelayText(`${FREEDNS_PUBLIC_PAGE}?${qs.toString()}`));
-    return {
-      total: parsed.total,
-      pages: parsed.pages,
-      page: fetchPage,
-      least,
-      domains: parsed.domains,
-      via: "public",
+    const base = new URLSearchParams({ sort: String(sort) });
+    if (query) base.set("q", query);
+    const fetchPublic = async (p: number) => {
+      const qs = new URLSearchParams(base);
+      qs.set("page", String(p));
+      const target = `${FREEDNS_PUBLIC_PAGE}?${qs.toString()}`;
+      // Raw-HTML proxies first (exact parse), then jina's markdown rendering.
+      try {
+        const parsed = parseRegistryHtml(await publicRelayRaw(target));
+        if (parsed.domains.length > 0) return parsed;
+      } catch {
+        /* raw proxies down — fall through to the markdown renderer */
+      }
+      return parseRegistryMarkdown(await publicRelayJinaMarkdown(target));
     };
+    if (least) {
+      const first = await fetchPublic(1);
+      const fetchPage = Math.max(1, first.pages - page + 1);
+      const tail = await fetchPublic(fetchPage);
+      return { total: tail.total, pages: tail.pages, page: fetchPage, least, domains: tail.domains, via: "public" };
+    }
+    const parsed = await fetchPublic(page);
+    return { total: parsed.total, pages: parsed.pages, page, least: false, domains: parsed.domains, via: "public" };
   },
 
   /** Create the record that puts the IP on the internet:
@@ -406,6 +467,9 @@ export const freedns = {
           `${args.provider} updates need the api/freedns.py relay (deploy it, or run it on your own box and set the URL in the ⚡ panel) — only DuckDNS and ChangeIP work without one`,
         );
       }
+      // duckdns/changeip: their update APIs are pure GETs, so the public CORS
+      // relays carry them — but only the raw-byte proxies (jina refuses
+      // plain-text targets). If those two happen to be down, say so.
     }
     // duckdns: label (not FQDN) + token; changeip: creds in the query.
     let target: string;
@@ -423,7 +487,14 @@ export const freedns = {
         `&hostname=${encodeURIComponent(hostOut)}` +
         `&myip=${encodeURIComponent(args.ip ?? "")}`;
     }
-    const body = (await publicRelayText(target, 30_000)).trim().slice(0, 200);
+    let body: string;
+    try {
+      body = (await publicRelayRaw(target, 12_000)).trim().slice(0, 200);
+    } catch (e) {
+      throw new Error(
+        `${args.provider} update through the public relays failed (${e instanceof Error ? e.message : "unknown"}) — the public proxies are down or rate-limited right now; retry shortly or set a self-hosted relay in the ⚡ panel`,
+      );
+    }
     const ok = args.provider === "duckdns" ? body.toUpperCase().startsWith("OK") : /^200/i.test(body) || /^good/i.test(body);
     if (!ok) throw new Error(`${args.provider} refused via public relay: ${body || "(empty reply)"}`);
     return { ok: true, provider: args.provider, host: hostOut, ip: args.ip ?? "", reply: body };

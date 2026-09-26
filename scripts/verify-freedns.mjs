@@ -8,7 +8,12 @@ const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => {
-  if (m.type() === "error") errors.push("console: " + m.text());
+  if (m.type() !== "error") return;
+  // Expected on static hosts: the public-relay fallback chain TRIES raw
+  // proxies that may CORS-fail/hang before the working one answers. That's
+  // the designed degradation, not an app bug — don't fail the run for it.
+  if (/blocked by CORS policy|ERR_FAILED/.test(m.text()) && /allorigins|codetabs|jina\.ai/.test(m.text())) return;
+  errors.push("console: " + m.text());
 });
 
 await page.goto("http://localhost:3000/#/generate", { waitUntil: "load" });
@@ -53,6 +58,26 @@ const leastCopy = await page.evaluate(() => {
   return t("p").some((s) => s.includes("least popular"));
 });
 console.log("least-popular copy:", leastCopy);
+
+// 🌐 Public registry browser — the tier-3 fallback (works with NO relay at
+// all, i.e. on static hosting): it must fetch the public registry through the
+// public CORS relays and render real domains client-side.
+await page.evaluate(() => {
+  const btn = [...document.querySelectorAll("button")].find((b) => b.textContent.includes("Public registry"));
+  btn?.scrollIntoView({ block: "center" });
+  btn?.click();
+});
+await page.waitForTimeout(60_000); // raw-proxy failures + jina render can take a while
+const pub = await page.evaluate(() => {
+  const t = (sel) => [...document.querySelectorAll(sel)].map((e) => e.textContent.trim());
+  return {
+    viaPublic: t("span").some((s) => s.includes("via public relay")),
+    domainButtons: [...document.querySelectorAll("button")].filter((b) => /\d+ hosts$/.test(b.textContent.trim()) && b.textContent.includes(".")).length,
+    err: t("p").find((s) => s.startsWith("✗")) ?? null,
+    busy: t("p").find((s) => s.includes("public registry") || s.includes("public domains")) ?? null,
+  };
+});
+console.log("public registry:", JSON.stringify(pub));
 
 // 🧰 BYOD automator toolbox: open it, compose a wildcard host, check adoption.
 await page.evaluate(() => {
@@ -119,6 +144,8 @@ const ok =
   opened.newAccountBtn &&
   opened.loginBtn &&
   leastCopy &&
+  pub.domainButtons > 0 &&
+  pub.viaPublic &&
   toolbox.composerHost &&
   toolbox.ddnsPanel &&
   toolbox.tunnelPanel &&
